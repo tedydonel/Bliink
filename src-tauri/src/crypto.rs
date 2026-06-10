@@ -96,6 +96,26 @@ impl SecureStream {
         &self.verification_code
     }
 
+    /// Split into independent read/write halves so a long-lived channel can
+    /// send and receive concurrently. Each half keeps its own nonce counter.
+    pub fn into_split(self) -> (SecureReader, SecureWriter) {
+        let (read_half, write_half) = self.stream.into_split();
+        (
+            SecureReader {
+                stream: read_half,
+                cipher: self.cipher.clone(),
+                prefix: self.recv_prefix,
+                counter: self.recv_counter,
+            },
+            SecureWriter {
+                stream: write_half,
+                cipher: self.cipher,
+                prefix: self.send_prefix,
+                counter: self.send_counter,
+            },
+        )
+    }
+
     fn nonce(prefix: u8, counter: u64) -> [u8; 12] {
         let mut nonce = [0u8; 12];
         nonce[0] = prefix;
@@ -147,5 +167,71 @@ impl SecureStream {
         self.cipher
             .decrypt(Nonce::from_slice(&nonce), buf.as_slice())
             .map_err(|_| "Decryption failed — data corrupted or tampered with".to_string())
+    }
+}
+
+/// Receiving half of a split SecureStream.
+pub struct SecureReader {
+    stream: tokio::net::tcp::OwnedReadHalf,
+    cipher: Aes256Gcm,
+    prefix: u8,
+    counter: u64,
+}
+
+impl SecureReader {
+    pub async fn recv_frame(&mut self) -> Result<Vec<u8>, String> {
+        let mut len_buf = [0u8; 4];
+        self.stream
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(|e| format!("Read error: {}", e))?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+        if len == 0 || len > MAX_FRAME_LEN {
+            return Err(format!("Invalid frame length: {}", len));
+        }
+
+        let mut buf = vec![0u8; len];
+        self.stream
+            .read_exact(&mut buf)
+            .await
+            .map_err(|e| format!("Read error: {}", e))?;
+
+        let nonce = SecureStream::nonce(self.prefix, self.counter);
+        self.counter += 1;
+
+        self.cipher
+            .decrypt(Nonce::from_slice(&nonce), buf.as_slice())
+            .map_err(|_| "Decryption failed — data corrupted or tampered with".to_string())
+    }
+}
+
+/// Sending half of a split SecureStream.
+pub struct SecureWriter {
+    stream: tokio::net::tcp::OwnedWriteHalf,
+    cipher: Aes256Gcm,
+    prefix: u8,
+    counter: u64,
+}
+
+impl SecureWriter {
+    pub async fn send_frame(&mut self, plaintext: &[u8]) -> Result<(), String> {
+        let nonce = SecureStream::nonce(self.prefix, self.counter);
+        self.counter += 1;
+
+        let ciphertext = self
+            .cipher
+            .encrypt(Nonce::from_slice(&nonce), plaintext)
+            .map_err(|_| "Encryption failed".to_string())?;
+
+        let len = ciphertext.len() as u32;
+        self.stream
+            .write_all(&len.to_be_bytes())
+            .await
+            .map_err(|e| format!("Write error: {}", e))?;
+        self.stream
+            .write_all(&ciphertext)
+            .await
+            .map_err(|e| format!("Write error: {}", e))?;
+        Ok(())
     }
 }

@@ -44,6 +44,8 @@ export default function TransferPage() {
     const groups = new Map<string, TransferItem[]>();
     const list: Entry[] = [];
     for (const t of transfers) {
+      // Chat attachments live in the chat UI, not here
+      if (t.chatMessageId) continue;
       if (t.batchId) {
         let group = groups.get(t.batchId);
         if (!group) {

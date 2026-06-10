@@ -1,7 +1,10 @@
+use crate::chat::ChatService;
 use crate::discovery::DiscoveryService;
 use crate::history::HistoryStore;
 use crate::transfer::TransferEngine;
-use crate::types::{AppSettings, Device, HistoryEntry, PersistedConfig, TransferItem};
+use crate::types::{
+    AppSettings, ChatMessage, Conversation, Device, HistoryEntry, PersistedConfig, TransferItem,
+};
 use log::info;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +14,7 @@ use tokio::sync::Mutex;
 pub struct AppState {
     pub discovery: Arc<Mutex<DiscoveryService>>,
     pub transfer: Arc<TransferEngine>,
+    pub chat: Arc<ChatService>,
     pub history: Option<Arc<HistoryStore>>,
     pub settings: Arc<Mutex<AppSettings>>,
     pub device_id: String,
@@ -222,6 +226,85 @@ pub async fn clear_history(state: State<'_, AppState>) -> Result<(), String> {
         return Ok(());
     };
     history.clear().await
+}
+
+// ─── Chat Commands ──────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_conversations(state: State<'_, AppState>) -> Result<Vec<Conversation>, String> {
+    state.chat.get_conversations().await
+}
+
+#[tauri::command]
+pub async fn get_chat_messages(
+    state: State<'_, AppState>,
+    device_id: String,
+    limit: u32,
+) -> Result<Vec<ChatMessage>, String> {
+    state.chat.get_messages(&device_id, limit).await
+}
+
+#[tauri::command]
+pub async fn send_chat_message(
+    state: State<'_, AppState>,
+    device_id: String,
+    text: String,
+    reply_to: Option<String>,
+) -> Result<ChatMessage, String> {
+    state.chat.send_text(&device_id, text, reply_to).await
+}
+
+#[tauri::command]
+pub async fn send_chat_attachment(
+    state: State<'_, AppState>,
+    device_id: String,
+    file_path: String,
+    reply_to: Option<String>,
+) -> Result<ChatMessage, String> {
+    state
+        .chat
+        .send_attachment(&device_id, &file_path, None, reply_to)
+        .await
+}
+
+#[tauri::command]
+pub async fn send_voice_note(
+    state: State<'_, AppState>,
+    device_id: String,
+    data: String,
+) -> Result<ChatMessage, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&data)
+        .map_err(|e| format!("Invalid audio data: {}", e))?;
+    state.chat.send_voice_note(&device_id, bytes).await
+}
+
+#[tauri::command]
+pub async fn mark_conversation_read(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<(), String> {
+    state.chat.mark_read(&device_id).await
+}
+
+#[tauri::command]
+pub async fn set_typing(
+    state: State<'_, AppState>,
+    device_id: String,
+    typing: bool,
+) -> Result<(), String> {
+    state.chat.set_typing(&device_id, typing).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn send_call_signal(
+    state: State<'_, AppState>,
+    device_id: String,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    state.chat.send_call_signal(&device_id, payload).await
 }
 
 // ─── Settings Commands ──────────────────────────────────────────

@@ -26,6 +26,9 @@ pub struct Device {
     pub name: String,
     pub ip: String,
     pub port: u16,
+    /// Port for the persistent chat channel listener.
+    #[serde(default)]
+    pub chat_port: u16,
     pub device_type: DeviceType,
     pub status: DeviceStatus,
     pub os: Option<String>,
@@ -83,6 +86,10 @@ pub struct TransferItem {
     pub batch_total_files: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_total_bytes: Option<u64>,
+    /// Set when this transfer carries a chat attachment — hidden from the
+    /// Transfer page and history; the chat UI tracks it instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_message_id: Option<String>,
 }
 
 /// Emitted to the frontend when a remote device offers a file and
@@ -175,6 +182,51 @@ impl Default for AppSettings {
 pub struct PersistedConfig {
     pub device_id: String,
     pub settings: AppSettings,
+}
+
+// ─── Chat ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub id: String,
+    /// Peer device id this message belongs to.
+    pub conversation_id: String,
+    /// "in" | "out"
+    pub direction: String,
+    pub text: Option<String>,
+    /// "image" | "voice" | "file"
+    pub attachment_kind: Option<String>,
+    pub attachment_name: Option<String>,
+    pub attachment_path: Option<String>,
+    pub attachment_size: Option<u64>,
+    pub attachment_transfer_id: Option<String>,
+    /// Id of the message this one replies to.
+    pub reply_to: Option<String>,
+    /// out: sending | sent | delivered | read | failed
+    /// in:  receiving | unread | read
+    pub status: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Conversation {
+    pub device_id: String,
+    pub device_name: String,
+    pub last_preview: Option<String>,
+    pub last_message_at: Option<i64>,
+    pub unread_count: u32,
+    /// Whether the peer is currently reachable (discovered or channel up).
+    pub online: bool,
+}
+
+/// Typing indicator event payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypingEvent {
+    pub device_id: String,
+    pub typing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

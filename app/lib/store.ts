@@ -9,6 +9,7 @@ export interface Device {
   name: string;
   ip: string;
   port: number;
+  chatPort?: number;
   deviceType: DeviceType;
   status: DeviceStatus;
   os?: string;
@@ -51,6 +52,8 @@ export interface TransferItem {
   batchName?: string | null;
   batchTotalFiles?: number | null;
   batchTotalBytes?: number | null;
+  // Set when this transfer is a chat attachment (hidden from Transfer page)
+  chatMessageId?: string | null;
 }
 
 // An incoming file offer awaiting the user's accept/decline decision
@@ -86,6 +89,31 @@ export interface HistoryEntry {
   thumbnail?: string | null;
   batchId?: string | null;
   batchName?: string | null;
+}
+
+// ─── Chat Types ─────────────────────────────────────────────────
+export interface ChatMessage {
+  id: string;
+  conversationId: string;
+  direction: "in" | "out";
+  text?: string | null;
+  attachmentKind?: string | null;
+  attachmentName?: string | null;
+  attachmentPath?: string | null;
+  attachmentSize?: number | null;
+  attachmentTransferId?: string | null;
+  replyTo?: string | null;
+  status: string;
+  createdAt: number;
+}
+
+export interface Conversation {
+  deviceId: string;
+  deviceName: string;
+  lastPreview?: string | null;
+  lastMessageAt?: number | null;
+  unreadCount: number;
+  online: boolean;
 }
 
 // ─── Settings Types ─────────────────────────────────────────────
@@ -132,6 +160,15 @@ interface AppState {
   history: HistoryEntry[];
   setHistory: (entries: HistoryEntry[]) => void;
   addHistoryEntry: (entry: HistoryEntry) => void;
+
+  // Chat
+  conversations: Conversation[];
+  setConversations: (conversations: Conversation[]) => void;
+  chatMessages: Record<string, ChatMessage[]>;
+  setChatMessages: (conversationId: string, messages: ChatMessage[]) => void;
+  upsertChatMessage: (message: ChatMessage) => void;
+  typingPeers: Record<string, boolean>;
+  setPeerTyping: (deviceId: string, typing: boolean) => void;
 
   // Settings
   settings: AppSettings;
@@ -214,6 +251,28 @@ export const useAppStore = create<AppState>((set) => ({
   setHistory: (history) => set({ history }),
   addHistoryEntry: (entry) =>
     set((s) => ({ history: [entry, ...s.history] })),
+
+  // ── Chat ──
+  conversations: [],
+  setConversations: (conversations) => set({ conversations }),
+  chatMessages: {},
+  setChatMessages: (conversationId, messages) =>
+    set((s) => ({
+      chatMessages: { ...s.chatMessages, [conversationId]: messages },
+    })),
+  upsertChatMessage: (message) =>
+    set((s) => {
+      const existing = s.chatMessages[message.conversationId] ?? [];
+      const next = existing.some((m) => m.id === message.id)
+        ? existing.map((m) => (m.id === message.id ? { ...m, ...message } : m))
+        : [...existing, message].sort((a, b) => a.createdAt - b.createdAt);
+      return {
+        chatMessages: { ...s.chatMessages, [message.conversationId]: next },
+      };
+    }),
+  typingPeers: {},
+  setPeerTyping: (deviceId, typing) =>
+    set((s) => ({ typingPeers: { ...s.typingPeers, [deviceId]: typing } })),
 
   // ── Settings ──
   settings: {

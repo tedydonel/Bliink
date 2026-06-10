@@ -1,3 +1,4 @@
+mod chat;
 mod commands;
 mod config;
 mod crypto;
@@ -7,6 +8,7 @@ mod thumbs;
 mod transfer;
 mod types;
 
+use chat::{ChatEvent, ChatService, ChatStore};
 use commands::AppState;
 use discovery::DiscoveryService;
 use history::HistoryStore;
@@ -15,7 +17,7 @@ use types::{HistoryEntry, TransferDirection, TransferStatus};
 
 use log::{error, info};
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::Mutex;
 
@@ -53,12 +55,32 @@ pub fn run() {
                 .expect("Failed to get local address")
                 .port();
 
-            info!("Transfer listener bound to port {}", service_port);
+            // Bind chat channel listener to a dynamic port
+            let chat_listener = std::net::TcpListener::bind("0.0.0.0:0")
+                .expect("Failed to bind chat listener");
+            chat_listener
+                .set_nonblocking(true)
+                .expect("Failed to set nonblocking");
+            let chat_port = chat_listener
+                .local_addr()
+                .expect("Failed to get local address")
+                .port();
 
-            let discovery = DiscoveryService::new(&device_name, service_port, &device_id)
-                .expect("Failed to create discovery service");
+            info!(
+                "Transfer listener on port {}, chat listener on port {}",
+                service_port, chat_port
+            );
+
+            let discovery = Arc::new(Mutex::new(
+                DiscoveryService::new(&device_name, service_port, chat_port, &device_id)
+                    .expect("Failed to create discovery service"),
+            ));
 
             let transfer = Arc::new(TransferEngine::new());
+
+            // Chat media lands in the app data dir, not Downloads
+            let chat_media_dir = data_dir.join("chat-media");
+            let _ = std::fs::create_dir_all(&chat_media_dir);
 
             // Apply persisted transfer settings to the engine
             {
@@ -67,6 +89,7 @@ pub fn run() {
                 let chunk_size = settings.chunk_size as usize;
                 let auto_accept = settings.auto_accept_from_paired;
                 let require_pin = settings.require_pin;
+                let media_dir = chat_media_dir.clone();
                 tauri::async_runtime::spawn(async move {
                     if !download_path.is_empty() {
                         transfer.set_download_path(std::path::PathBuf::from(download_path));
@@ -74,6 +97,7 @@ pub fn run() {
                     transfer.set_chunk_size(chunk_size);
                     transfer.set_auto_accept(auto_accept);
                     transfer.set_require_pin(require_pin);
+                    transfer.set_chat_media_dir(media_dir);
                 });
             }
 
@@ -97,6 +121,10 @@ pub fn run() {
                         let Some(item) = engine.get_transfer(&progress.id).await else {
                             continue;
                         };
+                        // Chat attachments notify through the chat flow instead
+                        if item.chat_message_id.is_some() {
+                            continue;
+                        }
                         let (title, body) = match progress.status {
                             TransferStatus::Completed => match item.direction {
                                 TransferDirection::Download => (
@@ -184,6 +212,10 @@ pub fn run() {
                         let Some(item) = engine.get_transfer(&progress.id).await else {
                             continue;
                         };
+                        // Chat attachments live in chat history, not transfer history
+                        if item.chat_message_id.is_some() {
+                            continue;
+                        }
                         let entry = HistoryEntry {
                             id: item.id,
                             file_name: item.file_name,
@@ -209,6 +241,80 @@ pub fn run() {
                 });
             }
 
+            // Chat service: persistent encrypted channels + message store
+            let chat_store = Arc::new(
+                ChatStore::new(&data_dir.join("history.db")).expect("Failed to open chat store"),
+            );
+            let chat_service = Arc::new(ChatService::new(
+                device_id.clone(),
+                device_name.clone(),
+                chat_store,
+                discovery.clone(),
+                transfer.clone(),
+                chat_media_dir.clone(),
+            ));
+            {
+                let svc = chat_service.clone();
+                tauri::async_runtime::spawn(async move {
+                    match tokio::net::TcpListener::from_std(chat_listener) {
+                        Ok(listener) => svc.start(listener),
+                        Err(e) => error!("Failed to start chat listener: {}", e),
+                    }
+                });
+            }
+
+            // Forward chat events to the frontend + notify on new messages
+            {
+                let chat_app = app.handle().clone();
+                let chat_notif_settings = settings_state.clone();
+                let mut chat_rx = chat_service.events_receiver();
+                tauri::async_runtime::spawn(async move {
+                    while let Ok(event) = chat_rx.recv().await {
+                        match event {
+                            ChatEvent::Message(message) => {
+                                let _ = chat_app.emit("chat-message", &message);
+                            }
+                            ChatEvent::Incoming { message, peer_name } => {
+                                let _ = chat_app.emit("chat-message", &message);
+                                let focused = chat_app
+                                    .get_webview_window("main")
+                                    .and_then(|w| w.is_focused().ok())
+                                    .unwrap_or(false);
+                                if !focused
+                                    && chat_notif_settings.lock().await.show_notifications
+                                {
+                                    let body = chat::preview(&message);
+                                    if let Err(e) = chat_app
+                                        .notification()
+                                        .builder()
+                                        .title(format!("💬 {}", peer_name))
+                                        .body(body)
+                                        .show()
+                                    {
+                                        error!("Failed to show notification: {}", e);
+                                    }
+                                }
+                            }
+                            ChatEvent::Typing(typing) => {
+                                let _ = chat_app.emit("chat-typing", &typing);
+                            }
+                            ChatEvent::ConversationsChanged => {
+                                let _ = chat_app.emit("chat-conversations", ());
+                            }
+                            ChatEvent::CallSignal { device_id, payload } => {
+                                let _ = chat_app.emit(
+                                    "call-signal",
+                                    serde_json::json!({
+                                        "deviceId": device_id,
+                                        "payload": payload,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+
             // Start transfer listener
             let transfer_clone = transfer.clone();
             tauri::async_runtime::spawn(async move {
@@ -225,8 +331,9 @@ pub fn run() {
             let _ = std::fs::create_dir_all(&thumb_cache_dir);
 
             app.manage(AppState {
-                discovery: Arc::new(Mutex::new(discovery)),
+                discovery,
                 transfer,
+                chat: chat_service,
                 history,
                 settings: settings_state,
                 device_id,
@@ -257,6 +364,14 @@ pub fn run() {
             commands::get_device_info,
             commands::get_file_metadata,
             commands::get_thumbnail,
+            commands::get_conversations,
+            commands::get_chat_messages,
+            commands::send_chat_message,
+            commands::send_chat_attachment,
+            commands::send_voice_note,
+            commands::mark_conversation_read,
+            commands::set_typing,
+            commands::send_call_signal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

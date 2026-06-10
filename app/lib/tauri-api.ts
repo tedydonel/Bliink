@@ -3,6 +3,8 @@ import type {
   HistoryEntry,
   TransferItem,
   TransferRequest,
+  ChatMessage,
+  Conversation,
   AppSettings,
 } from "./store";
 
@@ -14,6 +16,7 @@ type ListenFn = (
 
 let invoke: InvokeFn | null = null;
 let listen: ListenFn | null = null;
+let convertSrc: ((path: string) => string) | null = null;
 
 function isTauriEnv(): boolean {
   return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
@@ -24,14 +27,26 @@ async function ensureTauri(): Promise<boolean> {
   if (!isTauriEnv()) return false;
 
   try {
-    const { invoke: inv } = await import("@tauri-apps/api/core");
+    const core = await import("@tauri-apps/api/core");
     const { listen: lis } = await import("@tauri-apps/api/event");
-    invoke = inv as InvokeFn;
+    invoke = core.invoke as InvokeFn;
+    convertSrc = core.convertFileSrc;
     listen = lis as ListenFn;
     return true;
   } catch {
     return false;
   }
+}
+
+// Warm up eagerly so sync helpers (assetUrl) work as early as possible
+if (typeof window !== "undefined") {
+  void ensureTauri();
+}
+
+/** Local file path → URL the webview is allowed to load (asset protocol). */
+export function assetUrl(path?: string | null): string | null {
+  if (!path || !convertSrc) return null;
+  return convertSrc(path);
 }
 
 // ─── Discovery ──────────────────────────────────────────────────
@@ -287,6 +302,93 @@ export async function openFileDialog(): Promise<{ name: string; path: string; si
     console.error("Failed to open file dialog:", e);
     return [];
   }
+}
+
+// ─── Chat ───────────────────────────────────────────────────────
+
+export async function getConversations(): Promise<Conversation[]> {
+  if (!(await ensureTauri())) return [];
+  return (await invoke!("get_conversations")) as Conversation[];
+}
+
+export async function getChatMessages(
+  deviceId: string,
+  limit = 200
+): Promise<ChatMessage[]> {
+  if (!(await ensureTauri())) return [];
+  return (await invoke!("get_chat_messages", { deviceId, limit })) as ChatMessage[];
+}
+
+export async function sendChatMessage(
+  deviceId: string,
+  text: string,
+  replyTo?: string | null
+): Promise<ChatMessage | null> {
+  if (!(await ensureTauri())) return null;
+  return (await invoke!("send_chat_message", {
+    deviceId,
+    text,
+    replyTo: replyTo ?? null,
+  })) as ChatMessage;
+}
+
+export async function sendChatAttachment(
+  deviceId: string,
+  filePath: string,
+  replyTo?: string | null
+): Promise<ChatMessage | null> {
+  if (!(await ensureTauri())) return null;
+  return (await invoke!("send_chat_attachment", {
+    deviceId,
+    filePath,
+    replyTo: replyTo ?? null,
+  })) as ChatMessage;
+}
+
+export async function sendVoiceNote(
+  deviceId: string,
+  base64Data: string
+): Promise<ChatMessage | null> {
+  if (!(await ensureTauri())) return null;
+  return (await invoke!("send_voice_note", {
+    deviceId,
+    data: base64Data,
+  })) as ChatMessage;
+}
+
+export async function markConversationRead(deviceId: string): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("mark_conversation_read", { deviceId });
+}
+
+export async function setTyping(deviceId: string, typing: boolean): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("set_typing", { deviceId, typing });
+}
+
+export async function onChatMessage(
+  handler: (message: ChatMessage) => void
+): Promise<() => void> {
+  if (!(await ensureTauri())) return () => {};
+  return listen!("chat-message", (event) => {
+    handler(event.payload as ChatMessage);
+  });
+}
+
+export async function onChatTyping(
+  handler: (event: { deviceId: string; typing: boolean }) => void
+): Promise<() => void> {
+  if (!(await ensureTauri())) return () => {};
+  return listen!("chat-typing", (event) => {
+    handler(event.payload as { deviceId: string; typing: boolean });
+  });
+}
+
+export async function onChatConversations(
+  handler: () => void
+): Promise<() => void> {
+  if (!(await ensureTauri())) return () => {};
+  return listen!("chat-conversations", () => handler());
 }
 
 // ─── Thumbnails ─────────────────────────────────────────────────

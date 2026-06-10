@@ -4,6 +4,7 @@ import "./globals.css";
 import TitleBar from "./components/TitleBar";
 import Sidebar from "./components/Sidebar";
 import TransferListener from "./components/TransferListener";
+import ChatListener from "./components/ChatListener";
 import IncomingRequestDialog from "./components/IncomingRequestDialog";
 
 const geistSans = Geist({
@@ -32,6 +33,7 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased h-screen flex flex-col overflow-hidden`}
       >
         <TransferListener />
+        <ChatListener />
         <IncomingRequestDialog />
         <TitleBar />
         <div className="flex flex-1 overflow-hidden">

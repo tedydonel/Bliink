@@ -68,6 +68,10 @@ struct TransferHeader {
     /// coming before accepting.
     #[serde(default)]
     pub thumbnail: Option<String>,
+    /// Set when this transfer carries a chat attachment — bypasses the
+    /// consent prompt and lands in the chat media dir.
+    #[serde(default)]
+    pub chat_message_id: Option<String>,
 }
 
 /// Batch metadata shared by every file in a multi-file send.
@@ -96,6 +100,7 @@ struct SendJob {
     sender_name: String,
     relative_path: Option<String>,
     batch: Option<BatchMeta>,
+    chat_message_id: Option<String>,
 }
 
 /// A registered transfer ready to run: the item is already in the active
@@ -115,6 +120,7 @@ pub struct TransferEngine {
     request_tx: broadcast::Sender<TransferRequest>,
     code_tx: broadcast::Sender<TransferCode>,
     download_path: Arc<RwLock<PathBuf>>,
+    chat_media_dir: Arc<RwLock<PathBuf>>,
     chunk_size: Arc<RwLock<usize>>,
     auto_accept: Arc<RwLock<bool>>,
     require_pin: Arc<RwLock<bool>>,
@@ -130,6 +136,7 @@ struct ReceiverCtx {
     progress_tx: broadcast::Sender<TransferProgress>,
     request_tx: broadcast::Sender<TransferRequest>,
     download_path: Arc<RwLock<PathBuf>>,
+    chat_media_dir: Arc<RwLock<PathBuf>>,
     auto_accept: Arc<RwLock<bool>>,
     require_pin: Arc<RwLock<bool>>,
     pending: Arc<RwLock<HashMap<String, oneshot::Sender<bool>>>>,
@@ -152,6 +159,7 @@ impl TransferEngine {
             progress_tx,
             request_tx,
             code_tx,
+            chat_media_dir: Arc::new(RwLock::new(download_path.clone())),
             download_path: Arc::new(RwLock::new(download_path)),
             chunk_size: Arc::new(RwLock::new(CHUNK_SIZE)),
             auto_accept: Arc::new(RwLock::new(false)),
@@ -159,6 +167,13 @@ impl TransferEngine {
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
             batch_decisions: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn set_chat_media_dir(&self, dir: PathBuf) {
+        let cm = self.chat_media_dir.clone();
+        tokio::spawn(async move {
+            *cm.write().await = dir;
+        });
     }
 
     pub fn progress_receiver(&self) -> broadcast::Receiver<TransferProgress> {
@@ -219,6 +234,7 @@ impl TransferEngine {
             progress_tx: self.progress_tx.clone(),
             request_tx: self.request_tx.clone(),
             download_path: self.download_path.clone(),
+            chat_media_dir: self.chat_media_dir.clone(),
             auto_accept: self.auto_accept.clone(),
             require_pin: self.require_pin.clone(),
             pending: self.pending_requests.clone(),
@@ -302,6 +318,7 @@ impl TransferEngine {
             batch_total_files: job.batch.as_ref().map(|b| b.total_files),
             batch_total_bytes: job.batch.as_ref().map(|b| b.total_bytes),
             thumbnail: thumbnail.clone(),
+            chat_message_id: job.chat_message_id.clone(),
         };
 
         let transfer = TransferItem {
@@ -324,6 +341,7 @@ impl TransferEngine {
             batch_name: job.batch.as_ref().and_then(|b| b.name.clone()),
             batch_total_files: job.batch.as_ref().map(|b| b.total_files),
             batch_total_bytes: job.batch.as_ref().map(|b| b.total_bytes),
+            chat_message_id: job.chat_message_id,
         };
 
         self.active_transfers
@@ -402,6 +420,37 @@ impl TransferEngine {
             sender_name: sender_name.to_string(),
             relative_path: None,
             batch: None,
+            chat_message_id: None,
+        };
+        let prepared = self.prepare_send(job).await?;
+        let transfer_id = prepared.transfer_id.clone();
+        self.spawn_send(prepared);
+        Ok(transfer_id)
+    }
+
+    /// Send a file as a chat attachment — receiver auto-accepts it into the
+    /// chat media dir. Returns the transfer id.
+    pub async fn send_chat_attachment(
+        self: &Arc<Self>,
+        file_path: &str,
+        device_ip: &str,
+        device_port: u16,
+        device_id: &str,
+        device_name: &str,
+        sender_id: &str,
+        sender_name: &str,
+        chat_message_id: &str,
+    ) -> Result<String, String> {
+        let job = SendJob {
+            path: PathBuf::from(file_path),
+            target: format!("{}:{}", device_ip, device_port),
+            device_id: device_id.to_string(),
+            device_name: device_name.to_string(),
+            sender_id: sender_id.to_string(),
+            sender_name: sender_name.to_string(),
+            relative_path: None,
+            batch: None,
+            chat_message_id: Some(chat_message_id.to_string()),
         };
         let prepared = self.prepare_send(job).await?;
         let transfer_id = prepared.transfer_id.clone();
@@ -436,6 +485,7 @@ impl TransferEngine {
                     sender_name: sender_name.clone(),
                     relative_path,
                     batch: batch.clone(),
+                    chat_message_id: None,
                 };
                 let transfer_id = match engine.prepare_send(job).await {
                     Ok(prepared) => {
@@ -871,7 +921,13 @@ async fn handle_incoming(stream: TcpStream, ctx: ReceiverCtx) -> Result<(), Stri
 
     // Resolve destination: sanitize sender-supplied names (they could
     // contain path traversal) and avoid clobbering existing files.
-    let dl_path = ctx.download_path.read().await.clone();
+    // Chat attachments go to the chat media dir instead of Downloads.
+    let is_chat = header.chat_message_id.is_some();
+    let dl_path = if is_chat {
+        ctx.chat_media_dir.read().await.clone()
+    } else {
+        ctx.download_path.read().await.clone()
+    };
     let (dest_dir, base_name) = match header.relative_path.as_deref() {
         Some(rel) => {
             let parts: Vec<String> = rel
@@ -926,6 +982,7 @@ async fn handle_incoming(stream: TcpStream, ctx: ReceiverCtx) -> Result<(), Stri
         batch_name: header.batch_name.clone(),
         batch_total_files: header.batch_total_files,
         batch_total_bytes: header.batch_total_bytes,
+        chat_message_id: header.chat_message_id.clone(),
     };
 
     {
@@ -953,7 +1010,11 @@ async fn handle_incoming(stream: TcpStream, ctx: ReceiverCtx) -> Result<(), Stri
     }
 
     let auto = *ctx.auto_accept.read().await;
-    let accepted = if let Some(consent) = batch_consent {
+    let accepted = if is_chat {
+        // Chat attachments arrive in the context of an open conversation —
+        // the chat itself is the consent.
+        true
+    } else if let Some(consent) = batch_consent {
         consent
     } else if auto {
         true

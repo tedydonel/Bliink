@@ -16,6 +16,8 @@ struct DiscoveryMessage {
     id: String,
     name: String,
     port: u16,
+    #[serde(default)]
+    chat_port: u16,
     device_type: String,
     os: String,
 }
@@ -25,20 +27,32 @@ pub struct DiscoveryService {
     device_id: String,
     device_name: String,
     service_port: u16,
+    chat_port: u16,
     shutdown_tx: Option<broadcast::Sender<()>>,
     is_running: bool,
 }
 
 impl DiscoveryService {
-    pub fn new(device_name: &str, service_port: u16, device_id: &str) -> Result<Self, String> {
+    pub fn new(
+        device_name: &str,
+        service_port: u16,
+        chat_port: u16,
+        device_id: &str,
+    ) -> Result<Self, String> {
         Ok(Self {
             devices: Arc::new(Mutex::new(HashMap::new())),
             device_id: device_id.to_string(),
             device_name: device_name.to_string(),
             service_port,
+            chat_port,
             shutdown_tx: None,
             is_running: false,
         })
+    }
+
+    /// Snapshot of a single discovered device.
+    pub fn get_device(&self, id: &str) -> Option<Device> {
+        self.devices.lock().unwrap().get(id).cloned()
     }
 
     #[allow(dead_code)]
@@ -61,6 +75,7 @@ impl DiscoveryService {
         let my_id = self.device_id.clone();
         let my_name = self.device_name.clone();
         let my_port = self.service_port;
+        let my_chat_port = self.chat_port;
 
         let os_name = std::env::consts::OS.to_string();
         let device_type_str = if cfg!(target_os = "android") || cfg!(target_os = "ios") {
@@ -84,6 +99,7 @@ impl DiscoveryService {
                 id: my_id.clone(),
                 name: my_name,
                 port: my_port,
+                chat_port: my_chat_port,
                 device_type: device_type_str,
                 os: os_name,
             };
@@ -150,6 +166,7 @@ impl DiscoveryService {
                                             name: received_msg.name,
                                             ip,
                                             port: received_msg.port,
+                                            chat_port: received_msg.chat_port,
                                             device_type,
                                             status: DeviceStatus::Online,
                                             os: Some(received_msg.os),

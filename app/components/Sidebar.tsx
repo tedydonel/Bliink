@@ -6,11 +6,11 @@ import { useState } from "react";
 import {
   Monitor,
   ArrowLeftRight,
+  MessageCircle,
   Clock,
   User,
   ChevronLeft,
   ChevronRight,
-  Menu,
 } from "lucide-react";
 import { cn } from "@/app/lib/utils";
 import { useAppStore } from "@/app/lib/store";
@@ -18,17 +18,21 @@ import { useAppStore } from "@/app/lib/store";
 const navItems = [
   { href: "/", label: "Devices", icon: Monitor },
   { href: "/transfer", label: "Transfer", icon: ArrowLeftRight },
+  { href: "/chats", label: "Chats", icon: MessageCircle },
   { href: "/history", label: "History", icon: Clock },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname();
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const { transfers, settings } = useAppStore();
-  
+  const { transfers, conversations, settings } = useAppStore();
+
   const activeCount = transfers.filter(
-    (t) => t.status === "transferring" || t.status === "pending"
+    (t) =>
+      !t.chatMessageId &&
+      (t.status === "transferring" || t.status === "pending")
   ).length;
+  const unreadCount = conversations.reduce((acc, c) => acc + c.unreadCount, 0);
 
   return (
     <aside 
@@ -52,7 +56,13 @@ export default function Sidebar() {
             item.href === "/"
               ? pathname === "/"
               : pathname.startsWith(item.href);
-          const showBadge = item.href === "/transfer" && activeCount > 0;
+          const badgeCount =
+            item.href === "/transfer"
+              ? activeCount
+              : item.href === "/chats"
+              ? unreadCount
+              : 0;
+          const showBadge = badgeCount > 0;
           
           return (
             <div key={item.href} className="relative group/tooltip">
@@ -77,7 +87,7 @@ export default function Sidebar() {
                     <span className="truncate">{item.label}</span>
                     {showBadge && (
                       <span className="ml-auto flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-sky/20 text-sky text-[10px] font-bold">
-                        {activeCount}
+                        {badgeCount}
                       </span>
                     )}
                   </>
