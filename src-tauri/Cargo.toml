@@ -1,0 +1,57 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.4", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.10.0", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Device discovery
+socket2 = "0.5"
+
+# Unique identifiers
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Networking & transfer
+sha2 = "0.10"
+hex = "0.4"
+
+# Database (embedded SQLite, no external server needed)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Hostname detection
+hostname = "0.4"
+
+# Encryption
+aes-gcm = "0.10"
+rand = "0.8"
+x25519-dalek = "2"
+
+# System directories
+dirs-next = "2.0"

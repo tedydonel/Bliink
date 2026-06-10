@@ -1,0 +1,290 @@
+import type {
+  Device,
+  HistoryEntry,
+  TransferItem,
+  TransferRequest,
+  AppSettings,
+} from "./store";
+
+type InvokeFn = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+type ListenFn = (
+  event: string,
+  handler: (event: { payload: unknown }) => void
+) => Promise<() => void>;
+
+let invoke: InvokeFn | null = null;
+let listen: ListenFn | null = null;
+
+function isTauriEnv(): boolean {
+  return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+}
+
+async function ensureTauri(): Promise<boolean> {
+  if (invoke && listen) return true;
+  if (!isTauriEnv()) return false;
+
+  try {
+    const { invoke: inv } = await import("@tauri-apps/api/core");
+    const { listen: lis } = await import("@tauri-apps/api/event");
+    invoke = inv as InvokeFn;
+    listen = lis as ListenFn;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ─── Discovery ──────────────────────────────────────────────────
+
+export async function startDiscovery(): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("start_discovery");
+}
+
+export async function stopDiscovery(): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("stop_discovery");
+}
+
+export async function getDevices(): Promise<Device[]> {
+  if (!(await ensureTauri())) return [];
+  return (await invoke!("get_devices")) as Device[];
+}
+
+export async function onDevicesUpdated(
+  handler: (devices: Device[]) => void
+): Promise<() => void> {
+  if (!(await ensureTauri())) return () => {};
+  return listen!("devices-updated", (event) => {
+    handler(event.payload as Device[]);
+  });
+}
+
+// ─── Transfer ───────────────────────────────────────────────────
+
+export async function sendFile(
+  filePath: string,
+  deviceIp: string,
+  devicePort: number,
+  deviceId: string,
+  deviceName: string
+): Promise<string> {
+  if (!(await ensureTauri())) {
+    console.log("Mock send file:", filePath, "to", deviceIp);
+    return "mock-transfer-id";
+  }
+
+  return (await invoke!("send_file", {
+    filePath,
+    deviceIp,
+    devicePort,
+    deviceId,
+    deviceName,
+  })) as string;
+}
+
+export async function pauseTransfer(id: string): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("pause_transfer", { id });
+}
+
+export async function resumeTransfer(id: string): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("resume_transfer", { id });
+}
+
+export async function cancelTransfer(id: string): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("cancel_transfer", { id });
+}
+
+export async function getActiveTransfers(): Promise<TransferItem[]> {
+  if (!(await ensureTauri())) return [];
+  return (await invoke!("get_active_transfers")) as TransferItem[];
+}
+
+export interface TransferProgress {
+  id: string;
+  progress: number;
+  speed: number;
+  status: string;
+  error: string | null;
+}
+
+export async function onTransferProgress(
+  handler: (progress: TransferProgress) => void
+): Promise<() => void> {
+  if (!(await ensureTauri())) return () => {};
+  return listen!("transfer-progress", (event) => {
+    handler(event.payload as TransferProgress);
+  });
+}
+
+export async function onTransferRequest(
+  handler: (request: TransferRequest) => void
+): Promise<() => void> {
+  if (!(await ensureTauri())) return () => {};
+  return listen!("transfer-request", (event) => {
+    handler(event.payload as TransferRequest);
+  });
+}
+
+export async function respondToTransfer(
+  id: string,
+  accept: boolean
+): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("respond_to_transfer", { id, accept });
+}
+
+export interface TransferCodeEvent {
+  id: string;
+  code: string;
+}
+
+export async function onTransferCode(
+  handler: (event: TransferCodeEvent) => void
+): Promise<() => void> {
+  if (!(await ensureTauri())) return () => {};
+  return listen!("transfer-code", (event) => {
+    handler(event.payload as TransferCodeEvent);
+  });
+}
+
+export async function sendFolder(
+  folderPath: string,
+  deviceIp: string,
+  devicePort: number,
+  deviceId: string,
+  deviceName: string
+): Promise<number> {
+  if (!(await ensureTauri())) return 0;
+  return (await invoke!("send_folder", {
+    folderPath,
+    deviceIp,
+    devicePort,
+    deviceId,
+    deviceName,
+  })) as number;
+}
+
+export async function openFolderDialog(): Promise<string | null> {
+  if (!(await ensureTauri())) return null;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({ directory: true, multiple: false });
+    return typeof selected === "string" ? selected : null;
+  } catch (e) {
+    console.error("Failed to open folder dialog:", e);
+    return null;
+  }
+}
+
+// ─── History ────────────────────────────────────────────────────
+
+export async function getHistory(
+  limit: number,
+  offset: number,
+  search?: string,
+  direction?: string,
+  status?: string
+): Promise<HistoryEntry[]> {
+  if (!(await ensureTauri())) return [];
+  return (await invoke!("get_history", {
+    limit,
+    offset,
+    search: search || null,
+    direction: direction || null,
+    status: status || null,
+  })) as HistoryEntry[];
+}
+
+export async function getHistoryCount(): Promise<number> {
+  if (!(await ensureTauri())) return 0;
+  return (await invoke!("get_history_count")) as number;
+}
+
+export async function clearHistory(): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("clear_history");
+}
+
+// ─── Settings ───────────────────────────────────────────────────
+
+export async function getSettings(): Promise<AppSettings | null> {
+  if (!(await ensureTauri())) return null;
+  return (await invoke!("get_settings")) as AppSettings;
+}
+
+export async function updateSettings(settings: AppSettings): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("update_settings", { updates: settings });
+}
+
+// ─── File Utilities ─────────────────────────────────────────────
+
+export interface FileMetadata {
+  size: number;
+  is_dir: boolean;
+  is_file: boolean;
+}
+
+export async function getFileMetadata(path: string): Promise<FileMetadata | null> {
+  if (!(await ensureTauri())) return null;
+  try {
+    return (await invoke!("get_file_metadata", { path })) as FileMetadata;
+  } catch {
+    return null;
+  }
+}
+
+export async function openFileDialog(): Promise<{ name: string; path: string; size: number }[]> {
+  if (!(await ensureTauri())) return [];
+
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: true,
+      directory: false,
+    });
+
+    if (!selected) return [];
+
+    const files = Array.isArray(selected) ? selected : [selected];
+    const results: { name: string; path: string; size: number }[] = [];
+
+    for (const filePath of files) {
+      const name = filePath.split(/[\\/]/).pop() || filePath;
+      let size = 0;
+
+      const metadata = await getFileMetadata(filePath);
+      if (metadata) {
+        size = metadata.size;
+      }
+
+      results.push({ name, path: filePath, size });
+    }
+
+    return results;
+  } catch (e) {
+    console.error("Failed to open file dialog:", e);
+    return [];
+  }
+}
+
+// ─── Device Info ────────────────────────────────────────────────
+
+export async function getDeviceInfo(): Promise<{
+  id: string;
+  name: string;
+  os: string;
+  arch: string;
+} | null> {
+  if (!(await ensureTauri())) return null;
+  return (await invoke!("get_device_info")) as {
+    id: string;
+    name: string;
+    os: string;
+    arch: string;
+  };
+}

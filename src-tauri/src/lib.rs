@@ -1,0 +1,253 @@
+mod commands;
+mod config;
+mod crypto;
+mod discovery;
+mod history;
+mod transfer;
+mod types;
+
+use commands::AppState;
+use discovery::DiscoveryService;
+use history::HistoryStore;
+use transfer::TransferEngine;
+use types::{HistoryEntry, TransferDirection, TransferStatus};
+
+use log::{error, info};
+use std::sync::Arc;
+use tauri::Manager;
+use tauri_plugin_notification::NotificationExt;
+use tokio::sync::Mutex;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            if cfg!(debug_assertions) {
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Info)
+                        .build(),
+                )?;
+            }
+
+            // Load persisted settings + stable device identity
+            let data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
+            let config_path = data_dir.join("settings.json");
+            let persisted = config::load_or_create(&config_path);
+            let settings = persisted.settings.clone();
+            let device_id = persisted.device_id.clone();
+            let device_name = settings.device_name.clone();
+
+            // Bind transfer listener to a dynamic port
+            let listener = std::net::TcpListener::bind("0.0.0.0:0")
+                .expect("Failed to bind transfer listener");
+            listener
+                .set_nonblocking(true)
+                .expect("Failed to set nonblocking");
+            let service_port = listener
+                .local_addr()
+                .expect("Failed to get local address")
+                .port();
+
+            info!("Transfer listener bound to port {}", service_port);
+
+            let discovery = DiscoveryService::new(&device_name, service_port, &device_id)
+                .expect("Failed to create discovery service");
+
+            let transfer = Arc::new(TransferEngine::new());
+
+            // Apply persisted transfer settings to the engine
+            {
+                let transfer = transfer.clone();
+                let download_path = settings.download_path.clone();
+                let chunk_size = settings.chunk_size as usize;
+                let auto_accept = settings.auto_accept_from_paired;
+                let require_pin = settings.require_pin;
+                tauri::async_runtime::spawn(async move {
+                    if !download_path.is_empty() {
+                        transfer.set_download_path(std::path::PathBuf::from(download_path));
+                    }
+                    transfer.set_chunk_size(chunk_size);
+                    transfer.set_auto_accept(auto_accept);
+                    transfer.set_require_pin(require_pin);
+                });
+            }
+
+            let settings_state = Arc::new(Mutex::new(settings));
+
+            // Desktop notifications for transfer events
+            {
+                let notif_app = app.handle().clone();
+                let notif_settings = settings_state.clone();
+                let engine = transfer.clone();
+                let mut progress_rx = transfer.progress_receiver();
+                tauri::async_runtime::spawn(async move {
+                    while let Ok(progress) = progress_rx.recv().await {
+                        let is_terminal = matches!(
+                            progress.status,
+                            TransferStatus::Completed | TransferStatus::Failed
+                        );
+                        if !is_terminal || !notif_settings.lock().await.show_notifications {
+                            continue;
+                        }
+                        let Some(item) = engine.get_transfer(&progress.id).await else {
+                            continue;
+                        };
+                        let (title, body) = match progress.status {
+                            TransferStatus::Completed => match item.direction {
+                                TransferDirection::Download => (
+                                    "File received".to_string(),
+                                    format!("{} from {}", item.file_name, item.device_name),
+                                ),
+                                TransferDirection::Upload => (
+                                    "File sent".to_string(),
+                                    format!("{} to {}", item.file_name, item.device_name),
+                                ),
+                            },
+                            _ => (
+                                "Transfer failed".to_string(),
+                                format!(
+                                    "{}: {}",
+                                    item.file_name,
+                                    item.error.unwrap_or_else(|| "Unknown error".to_string())
+                                ),
+                            ),
+                        };
+                        if let Err(e) = notif_app
+                            .notification()
+                            .builder()
+                            .title(title)
+                            .body(body)
+                            .show()
+                        {
+                            error!("Failed to show notification: {}", e);
+                        }
+                    }
+                });
+
+                let notif_app = app.handle().clone();
+                let notif_settings = settings_state.clone();
+                let mut request_rx = transfer.request_receiver();
+                tauri::async_runtime::spawn(async move {
+                    while let Ok(request) = request_rx.recv().await {
+                        if !notif_settings.lock().await.show_notifications {
+                            continue;
+                        }
+                        let body = match (&request.batch_name, request.batch_total_files) {
+                            (Some(folder), Some(count)) => format!(
+                                "{} wants to send folder \"{}\" ({} files)",
+                                request.sender_name, folder, count
+                            ),
+                            _ => format!(
+                                "{} wants to send {}",
+                                request.sender_name, request.file_name
+                            ),
+                        };
+                        if let Err(e) = notif_app
+                            .notification()
+                            .builder()
+                            .title("Incoming file")
+                            .body(body)
+                            .show()
+                        {
+                            error!("Failed to show notification: {}", e);
+                        }
+                    }
+                });
+            }
+
+            // Embedded SQLite history store in the app data dir
+            let history = match HistoryStore::new(&data_dir.join("history.db")) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(e) => {
+                    error!("History disabled: {}", e);
+                    None
+                }
+            };
+
+            // Record every finished transfer (sent or received) to history
+            if let Some(store) = history.clone() {
+                let engine = transfer.clone();
+                let mut rx = transfer.progress_receiver();
+                tauri::async_runtime::spawn(async move {
+                    while let Ok(progress) = rx.recv().await {
+                        let status = match progress.status {
+                            TransferStatus::Completed => "completed",
+                            TransferStatus::Failed => "failed",
+                            TransferStatus::Cancelled => "cancelled",
+                            _ => continue,
+                        };
+                        let Some(item) = engine.get_transfer(&progress.id).await else {
+                            continue;
+                        };
+                        let entry = HistoryEntry {
+                            id: item.id,
+                            file_name: item.file_name,
+                            file_size: item.file_size,
+                            file_type: item.file_type,
+                            direction: item.direction,
+                            device_id: item.device_id,
+                            device_name: item.device_name,
+                            status: status.to_string(),
+                            started_at: item.started_at,
+                            completed_at: item
+                                .completed_at
+                                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
+                            hash: None,
+                        };
+                        if let Err(e) = store.add_entry(&entry).await {
+                            error!("Failed to record transfer in history: {}", e);
+                        }
+                    }
+                });
+            }
+
+            // Start transfer listener
+            let transfer_clone = transfer.clone();
+            tauri::async_runtime::spawn(async move {
+                let tokio_listener = tokio::net::TcpListener::from_std(listener)
+                    .expect("Failed to convert to tokio listener");
+                if let Err(e) = transfer_clone.start_with_listener(tokio_listener).await {
+                    error!("Failed to start transfer listener: {}", e);
+                }
+            });
+
+            commands::start_progress_emitter(app.handle().clone(), transfer.clone());
+
+            app.manage(AppState {
+                discovery: Arc::new(Mutex::new(discovery)),
+                transfer,
+                history,
+                settings: settings_state,
+                device_id,
+                config_path,
+            });
+
+            info!("Bliink backend initialized");
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::start_discovery,
+            commands::stop_discovery,
+            commands::get_devices,
+            commands::send_file,
+            commands::send_folder,
+            commands::pause_transfer,
+            commands::resume_transfer,
+            commands::cancel_transfer,
+            commands::get_active_transfers,
+            commands::respond_to_transfer,
+            commands::get_history,
+            commands::get_history_count,
+            commands::clear_history,
+            commands::get_settings,
+            commands::update_settings,
+            commands::get_device_info,
+            commands::get_file_metadata,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
