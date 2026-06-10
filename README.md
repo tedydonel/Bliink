@@ -1,47 +1,144 @@
+<div align="center">
+
+<img src="public/app-icon.png" width="96" height="96" alt="Bliink logo" />
+
 # Bliink
 
-Fast, encrypted file sharing for your local network. No cloud, no accounts — devices discover each other automatically and transfer files directly, end to end.
+**Fast, encrypted file sharing for your local network.**
 
-Built with [Tauri 2](https://tauri.app) (Rust) and [Next.js](https://nextjs.org).
+No cloud. No accounts. No size limits. Devices find each other automatically and transfer files directly — encrypted end to end.
 
-## Features
+[![License: MIT](https://img.shields.io/badge/License-MIT-38bdf8.svg)](LICENSE)
+[![Built with Tauri](https://img.shields.io/badge/Tauri-2.0-FFC131?logo=tauri&logoColor=white)](https://tauri.app)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org)
+[![Rust](https://img.shields.io/badge/Rust-backend-orange?logo=rust)](https://www.rust-lang.org)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#-contributing)
 
-- **Automatic device discovery** on your LAN (UDP broadcast)
-- **Encrypted transfers** — X25519 key exchange + AES-256-GCM on every connection
-- **Verification codes** — compare a 6-digit code on both screens to rule out interception
-- **Consent prompts** — nothing lands on your disk without you accepting it (auto-accept optional)
-- **Verified delivery** — SHA-256 checked on the receiver before the sender sees "completed"
-- **Folder transfers** — send whole directory trees as one batch with a single prompt
-- **Pause / resume / cancel** from either side
-- **Transfer history** stored locally in SQLite
-- **Desktop notifications** for incoming files and finished transfers
+<!-- 📷 HERO SCREENSHOT — replace this comment with your main app screenshot, e.g.:
+<img src="docs/screenshots/hero.png" width="800" alt="Bliink devices page" />
+-->
 
-## Development
+</div>
 
-Prerequisites: [Rust](https://rustup.rs), [Node.js](https://nodejs.org), [pnpm](https://pnpm.io), and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your platform.
+---
+
+## ✨ Features
+
+| | |
+|---|---|
+| 🔍 **Zero-config discovery** | Devices running Bliink find each other automatically on your LAN — no IP addresses, no pairing codes to type |
+| 🔐 **Encrypted by default** | Every transfer negotiates a fresh X25519 key exchange and streams over AES-256-GCM |
+| 🛡️ **Verification codes** | Both screens show a 6-digit code derived from the session key — if they match, nobody is intercepting |
+| ✋ **Consent first** | Incoming files prompt before a single byte lands on disk (auto-accept is opt-in) |
+| ✅ **Verified delivery** | SHA-256 checked on the receiver before the sender ever sees "completed" |
+| 📁 **Folder & batch transfers** | Send whole directory trees or multi-file selections as one batch with a single prompt |
+| 🖼️ **Live previews** | Thumbnails for images, videos and documents — receivers see what's coming *before* accepting |
+| 🗂️ **Collapsible groups** | Batches roll up into expandable group cards with aggregate progress on both ends |
+| ⏯️ **Full transfer control** | Pause, resume and cancel from either side |
+| 🕓 **Transfer history** | Searchable, filterable history stored locally in SQLite |
+| 🔔 **Native notifications** | Toasts for incoming requests and finished transfers |
+
+## 📸 Screenshots
+
+<!-- 📷 Add your screenshots here. Suggested layout (drop images into docs/screenshots/):
+
+| Devices | Transfer | History |
+|---|---|---|
+| <img src="docs/screenshots/devices.png" width="260" /> | <img src="docs/screenshots/transfer.png" width="260" /> | <img src="docs/screenshots/history.png" width="260" /> |
+
+| Incoming file prompt | Batch groups |
+|---|---|
+| <img src="docs/screenshots/prompt.png" width="400" /> | <img src="docs/screenshots/groups.png" width="400" /> |
+-->
+
+*Screenshots coming soon.*
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- [Rust](https://rustup.rs) (stable)
+- [Node.js](https://nodejs.org) 20+ and [pnpm](https://pnpm.io)
+- Platform setup from the [Tauri prerequisites guide](https://tauri.app/start/prerequisites/)
+
+### Run from source
 
 ```bash
+git clone https://github.com/tedydonel/Bliink.git
+cd Bliink
 pnpm install
-pnpm tauri dev      # run the desktop app in dev mode
-pnpm tauri build    # produce a release bundle
+pnpm tauri dev
 ```
 
-The frontend lives in `app/` (Next.js App Router, static export) and the backend in `src-tauri/src/`:
+### Build a release bundle
 
-| Module | Purpose |
-| --- | --- |
-| `discovery.rs` | UDP broadcast device discovery |
-| `transfer.rs` | Transfer engine: send/receive, batching, consent, pause/cancel |
-| `crypto.rs` | Encrypted stream (X25519 + AES-256-GCM) and verification codes |
-| `history.rs` | SQLite transfer history |
-| `config.rs` | Persisted settings and device identity |
+```bash
+pnpm tauri build
+```
 
-Both devices must run the same protocol version to talk to each other.
+Installers land in `src-tauri/target/release/bundle/`.
 
-## Security notes
+> **Note:** Bliink talks over UDP port 9001 (discovery) and a dynamic TCP port (transfers). If Windows Firewall prompts you, allow access on private networks — or run `setup-firewall.ps1` as administrator.
 
-Transfers are encrypted with ephemeral keys negotiated per connection. The key exchange is unauthenticated, so for sensitive transfers compare the on-screen verification codes (enable **Require Code Check** in settings to make this mandatory). Received filenames are sanitized against path traversal, and incoming files require explicit acceptance by default.
+## 🛡️ Security Model
 
-## License
+Bliink is designed so that using it casually is safe, and using it carefully is verifiably safe:
 
-[MIT](LICENSE)
+1. **Ephemeral encryption** — every connection performs an X25519 Diffie-Hellman exchange; data flows in AES-256-GCM frames with per-direction nonces. Keys live only as long as the transfer.
+2. **Man-in-the-middle detection** — both sides derive a 6-digit code from the session key. An interceptor ends up with two different sessions, so the codes won't match. Enable **Require Code Check** in settings to make confirming this mandatory before accepting.
+3. **Consent gate** — incoming transfers are declined automatically unless you accept within 60 seconds. Folder batches prompt once for the whole batch.
+4. **Tamper-proof delivery** — receivers hash incrementally and only acknowledge after verification; partial/failed downloads are cleaned up (`.part` files), never left masquerading as the real thing.
+5. **Path traversal protection** — sender-supplied names are sanitized component-by-component; a malicious peer can't write outside your download folder.
+
+Known limitation: the key exchange itself is unauthenticated (that's what the verification codes mitigate). PIN-bound pairing is on the roadmap.
+
+## 🏗️ Architecture
+
+```
+┌────────────────────────┐        UDP broadcast (:9001)        ┌────────────────────────┐
+│  Bliink (Device A)     │ ◄─────────  discovery  ───────────► │  Bliink (Device B)     │
+│                        │                                     │                        │
+│  Next.js UI (WebView)  │        TCP, dynamic port            │  Next.js UI (WebView)  │
+│  Rust core (Tauri 2)   │ ◄═══ X25519 + AES-256-GCM ════════► │  Rust core (Tauri 2)   │
+└────────────────────────┘         encrypted frames            └────────────────────────┘
+```
+
+| Layer | Tech | Source |
+|---|---|---|
+| UI | Next.js 16 (static export), Tailwind 4, Zustand | `app/` |
+| Device discovery | UDP broadcast + presence pruning | `src-tauri/src/discovery.rs` |
+| Transfer engine | Batching, consent, pause/cancel, acks | `src-tauri/src/transfer.rs` |
+| Encryption | X25519 handshake, AES-256-GCM framing, SAS codes | `src-tauri/src/crypto.rs` |
+| Previews | Windows Shell thumbnails + pure-Rust fallback | `src-tauri/src/thumbs.rs` |
+| History | Embedded SQLite | `src-tauri/src/history.rs` |
+| Settings | JSON in app data dir, stable device identity | `src-tauri/src/config.rs` |
+
+The wire protocol is versioned by release — both devices should run the same version.
+
+## 🗺️ Roadmap
+
+- [x] Encrypted transfers with verification codes
+- [x] Consent prompts & auto-accept setting
+- [x] Folder / multi-file batches with single prompt
+- [x] File previews (sender *and* receiver, before accepting)
+- [x] Collapsible batch groups
+- [x] Transfer history (SQLite) & desktop notifications
+- [ ] 💬 Built-in chat between devices (text, attachments, voice notes)
+- [ ] 📞 Audio calls over the LAN
+- [ ] 🌐 Web access — share with devices that don't have the app, from your browser
+- [ ] 🔗 PIN-bound device pairing
+- [ ] 📡 mDNS discovery
+
+## 🤝 Contributing
+
+Issues and pull requests are welcome! For larger changes, please open an issue first to discuss the direction.
+
+```bash
+pnpm exec tsc --noEmit   # type-check the frontend
+cargo check              # check the backend (run in src-tauri/)
+cargo test               # run backend tests
+```
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
