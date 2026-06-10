@@ -3,6 +3,7 @@ mod config;
 mod crypto;
 mod discovery;
 mod history;
+mod thumbs;
 mod transfer;
 mod types;
 
@@ -197,6 +198,9 @@ pub fn run() {
                                 .completed_at
                                 .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
                             hash: None,
+                            thumbnail: item.thumbnail,
+                            batch_id: item.batch_id,
+                            batch_name: item.batch_name,
                         };
                         if let Err(e) = store.add_entry(&entry).await {
                             error!("Failed to record transfer in history: {}", e);
@@ -217,6 +221,9 @@ pub fn run() {
 
             commands::start_progress_emitter(app.handle().clone(), transfer.clone());
 
+            let thumb_cache_dir = data_dir.join("thumbnails");
+            let _ = std::fs::create_dir_all(&thumb_cache_dir);
+
             app.manage(AppState {
                 discovery: Arc::new(Mutex::new(discovery)),
                 transfer,
@@ -224,6 +231,7 @@ pub fn run() {
                 settings: settings_state,
                 device_id,
                 config_path,
+                thumb_cache_dir,
             });
 
             info!("Bliink backend initialized");
@@ -234,6 +242,7 @@ pub fn run() {
             commands::stop_discovery,
             commands::get_devices,
             commands::send_file,
+            commands::send_files,
             commands::send_folder,
             commands::pause_transfer,
             commands::resume_transfer,
@@ -247,6 +256,7 @@ pub fn run() {
             commands::update_settings,
             commands::get_device_info,
             commands::get_file_metadata,
+            commands::get_thumbnail,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

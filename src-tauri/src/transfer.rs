@@ -15,8 +15,12 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use tokio::time::{timeout, Duration};
 
 const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB default
-const MAX_HEADER_LEN: usize = 64 * 1024;
+const MAX_HEADER_LEN: usize = 256 * 1024; // leaves room for an embedded thumbnail
 const MAX_BATCH_FILES: usize = 10_000;
+/// Cap for the thumbnail embedded in the transfer header (binary JPEG size).
+const MAX_EMBED_THUMB: usize = 64 * 1024;
+const EMBED_THUMB_PX: u32 = 96;
+const EMBED_THUMB_QUALITY: u8 = 55;
 
 // Protocol response bytes (sent inside encrypted frames)
 const RESP_DECLINE: u8 = 0;
@@ -60,13 +64,18 @@ struct TransferHeader {
     pub batch_total_files: Option<u32>,
     #[serde(default)]
     pub batch_total_bytes: Option<u64>,
+    /// Small JPEG preview as a data URL so the receiver can see what's
+    /// coming before accepting.
+    #[serde(default)]
+    pub thumbnail: Option<String>,
 }
 
-/// Folder-transfer metadata shared by every file in the batch.
+/// Batch metadata shared by every file in a multi-file send.
 #[derive(Debug, Clone)]
 struct BatchMeta {
     id: String,
-    name: String,
+    /// Folder name for folder sends; None for loose-file batches.
+    name: Option<String>,
     total_files: u32,
     total_bytes: u64,
 }
@@ -267,6 +276,16 @@ impl TransferEngine {
         info!("Computing hash for {}", display_name);
         let hash = compute_file_hash(&job.path).await?;
 
+        // Embed a small preview so the receiver sees it before accepting
+        let thumbnail = crate::thumbs::thumbnail_jpeg(
+            job.path.clone(),
+            EMBED_THUMB_PX,
+            EMBED_THUMB_QUALITY,
+        )
+        .await
+        .filter(|jpeg| jpeg.len() <= MAX_EMBED_THUMB)
+        .map(|jpeg| crate::thumbs::to_data_url(&jpeg));
+
         let header = TransferHeader {
             id: transfer_id.clone(),
             file_name,
@@ -279,9 +298,10 @@ impl TransferEngine {
             sender_name: job.sender_name,
             relative_path: job.relative_path,
             batch_id: job.batch.as_ref().map(|b| b.id.clone()),
-            batch_name: job.batch.as_ref().map(|b| b.name.clone()),
+            batch_name: job.batch.as_ref().and_then(|b| b.name.clone()),
             batch_total_files: job.batch.as_ref().map(|b| b.total_files),
             batch_total_bytes: job.batch.as_ref().map(|b| b.total_bytes),
+            thumbnail: thumbnail.clone(),
         };
 
         let transfer = TransferItem {
@@ -299,6 +319,11 @@ impl TransferEngine {
             completed_at: None,
             error: None,
             verification_code: None,
+            thumbnail,
+            batch_id: job.batch.as_ref().map(|b| b.id.clone()),
+            batch_name: job.batch.as_ref().and_then(|b| b.name.clone()),
+            batch_total_files: job.batch.as_ref().map(|b| b.total_files),
+            batch_total_bytes: job.batch.as_ref().map(|b| b.total_bytes),
         };
 
         self.active_transfers
@@ -384,6 +409,115 @@ impl TransferEngine {
         Ok(transfer_id)
     }
 
+    /// Send a set of (path, optional relative path) files sequentially as
+    /// one batch. Stops early if the receiver declines the batch.
+    fn spawn_batch(
+        self: &Arc<Self>,
+        files: Vec<(PathBuf, Option<String>)>,
+        batch: Option<BatchMeta>,
+        target: String,
+        device_id: String,
+        device_name: String,
+        sender_id: String,
+        sender_name: String,
+    ) {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            for (path, relative_path) in files {
+                let label = relative_path
+                    .clone()
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                let job = SendJob {
+                    path,
+                    target: target.clone(),
+                    device_id: device_id.clone(),
+                    device_name: device_name.clone(),
+                    sender_id: sender_id.clone(),
+                    sender_name: sender_name.clone(),
+                    relative_path,
+                    batch: batch.clone(),
+                };
+                let transfer_id = match engine.prepare_send(job).await {
+                    Ok(prepared) => {
+                        let id = prepared.transfer_id.clone();
+                        engine.run_send(prepared).await;
+                        id
+                    }
+                    Err(e) => {
+                        error!("Failed to send {}: {}", label, e);
+                        continue;
+                    }
+                };
+
+                // If the receiver declined the batch, stop sending the rest
+                if batch.is_some() {
+                    if let Some(item) = engine.get_transfer(&transfer_id).await {
+                        if item.status == TransferStatus::Cancelled
+                            && item.error.as_deref() == Some("Declined by receiver")
+                        {
+                            info!("Batch declined by receiver, stopping");
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Send multiple loose files as one batch — the receiver is prompted
+    /// once. Returns the number of files queued.
+    pub async fn send_files(
+        self: &Arc<Self>,
+        paths: Vec<String>,
+        device_ip: &str,
+        device_port: u16,
+        device_id: &str,
+        device_name: &str,
+        sender_id: &str,
+        sender_name: &str,
+    ) -> Result<u32, String> {
+        if paths.is_empty() {
+            return Err("No files to send".to_string());
+        }
+        if paths.len() > MAX_BATCH_FILES {
+            return Err(format!("Too many files (> {})", MAX_BATCH_FILES));
+        }
+
+        let mut files = Vec::new();
+        let mut total_bytes: u64 = 0;
+        for p in &paths {
+            let path = PathBuf::from(p);
+            let meta = fs::metadata(&path)
+                .await
+                .map_err(|e| format!("Cannot read {}: {}", p, e))?;
+            if !meta.is_file() {
+                return Err(format!("Not a file: {}", p));
+            }
+            total_bytes += meta.len();
+            files.push((path, None));
+        }
+
+        let total_files = files.len() as u32;
+        let batch = (total_files > 1).then(|| BatchMeta {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: None,
+            total_files,
+            total_bytes,
+        });
+
+        self.spawn_batch(
+            files,
+            batch,
+            format!("{}:{}", device_ip, device_port),
+            device_id.to_string(),
+            device_name.to_string(),
+            sender_id.to_string(),
+            sender_name.to_string(),
+        );
+
+        Ok(total_files)
+    }
+
     /// Walk a folder and send every file inside it as one batch. Files are
     /// sent sequentially; the receiver is prompted once for the whole batch.
     /// Returns the number of files queued.
@@ -422,7 +556,7 @@ impl TransferEngine {
         let total_bytes: u64 = files.iter().map(|(_, _, size)| size).sum();
         let batch = BatchMeta {
             id: uuid::Uuid::new_v4().to_string(),
-            name: folder_name.clone(),
+            name: Some(folder_name.clone()),
             total_files,
             total_bytes,
         };
@@ -432,48 +566,20 @@ impl TransferEngine {
             folder_name, total_files, total_bytes
         );
 
-        let engine = self.clone();
-        let target = format!("{}:{}", device_ip, device_port);
-        let device_id = device_id.to_string();
-        let device_name = device_name.to_string();
-        let sender_id = sender_id.to_string();
-        let sender_name = sender_name.to_string();
+        let files = files
+            .into_iter()
+            .map(|(path, rel, _)| (path, Some(format!("{}/{}", folder_name, rel))))
+            .collect();
 
-        tokio::spawn(async move {
-            for (path, rel, _size) in files {
-                let job = SendJob {
-                    path,
-                    target: target.clone(),
-                    device_id: device_id.clone(),
-                    device_name: device_name.clone(),
-                    sender_id: sender_id.clone(),
-                    sender_name: sender_name.clone(),
-                    relative_path: Some(format!("{}/{}", folder_name, rel)),
-                    batch: Some(batch.clone()),
-                };
-                let transfer_id = match engine.prepare_send(job).await {
-                    Ok(prepared) => {
-                        let id = prepared.transfer_id.clone();
-                        engine.run_send(prepared).await;
-                        id
-                    }
-                    Err(e) => {
-                        error!("Failed to send {}: {}", rel, e);
-                        continue;
-                    }
-                };
-
-                // If the receiver declined the batch, stop sending the rest
-                if let Some(item) = engine.get_transfer(&transfer_id).await {
-                    if item.status == TransferStatus::Cancelled
-                        && item.error.as_deref() == Some("Declined by receiver")
-                    {
-                        info!("Batch '{}' declined by receiver, stopping", batch.name);
-                        break;
-                    }
-                }
-            }
-        });
+        self.spawn_batch(
+            files,
+            Some(batch),
+            format!("{}:{}", device_ip, device_port),
+            device_id.to_string(),
+            device_name.to_string(),
+            sender_id.to_string(),
+            sender_name.to_string(),
+        );
 
         Ok(total_files)
     }
@@ -794,6 +900,12 @@ async fn handle_incoming(stream: TcpStream, ctx: ReceiverCtx) -> Result<(), Stri
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| base_name.clone());
 
+    // Sender-supplied preview — drop anything oversized or malformed
+    let thumbnail = header
+        .thumbnail
+        .clone()
+        .filter(|t| t.len() <= MAX_EMBED_THUMB * 2 && t.starts_with("data:image/"));
+
     let transfer = TransferItem {
         id: header.id.clone(),
         file_name: display_name.clone(),
@@ -809,6 +921,11 @@ async fn handle_incoming(stream: TcpStream, ctx: ReceiverCtx) -> Result<(), Stri
         completed_at: None,
         error: None,
         verification_code: Some(verification_code.clone()),
+        thumbnail: thumbnail.clone(),
+        batch_id: header.batch_id.clone(),
+        batch_name: header.batch_name.clone(),
+        batch_total_files: header.batch_total_files,
+        batch_total_bytes: header.batch_total_bytes,
     };
 
     {
@@ -855,6 +972,7 @@ async fn handle_incoming(stream: TcpStream, ctx: ReceiverCtx) -> Result<(), Stri
             batch_name: header.batch_name.clone(),
             batch_total_files: header.batch_total_files,
             batch_total_bytes: header.batch_total_bytes,
+            thumbnail: thumbnail.clone(),
         });
         let decision = match timeout(ACCEPT_DECISION_TIMEOUT, rx).await {
             Ok(Ok(choice)) => choice,

@@ -72,10 +72,10 @@ export default function TransferItemCard({
           : "bg-surface border-border"
       )}
     >
-      {/* File icon */}
+      {/* Preview or file icon */}
       <div
         className={cn(
-          "flex items-center justify-center w-10 h-10 rounded-lg shrink-0",
+          "flex items-center justify-center w-10 h-10 rounded-lg shrink-0 overflow-hidden",
           isDone
             ? "bg-success/10"
             : isFailed
@@ -83,16 +83,25 @@ export default function TransferItemCard({
             : "bg-surface-active"
         )}
       >
-        <FileIcon
-          className={cn(
-            "w-5 h-5",
-            isDone
-              ? "text-success"
-              : isFailed
-              ? "text-danger"
-              : "text-muted-light"
-          )}
-        />
+        {transfer.thumbnail ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={transfer.thumbnail}
+            alt=""
+            className="w-10 h-10 object-cover"
+          />
+        ) : (
+          <FileIcon
+            className={cn(
+              "w-5 h-5",
+              isDone
+                ? "text-success"
+                : isFailed
+                ? "text-danger"
+                : "text-muted-light"
+            )}
+          />
+        )}
       </div>
 
       {/* Info + progress */}

@@ -151,6 +151,23 @@ export async function onTransferCode(
   });
 }
 
+export async function sendFiles(
+  paths: string[],
+  deviceIp: string,
+  devicePort: number,
+  deviceId: string,
+  deviceName: string
+): Promise<number> {
+  if (!(await ensureTauri())) return 0;
+  return (await invoke!("send_files", {
+    paths,
+    deviceIp,
+    devicePort,
+    deviceId,
+    deviceName,
+  })) as number;
+}
+
 export async function sendFolder(
   folderPath: string,
   deviceIp: string,
@@ -269,6 +286,24 @@ export async function openFileDialog(): Promise<{ name: string; path: string; si
   } catch (e) {
     console.error("Failed to open file dialog:", e);
     return [];
+  }
+}
+
+// ─── Thumbnails ─────────────────────────────────────────────────
+
+const thumbCache = new Map<string, string | null>();
+
+/** Thumbnail data URL for a local file, cached per path. Null = no preview. */
+export async function getThumbnail(path: string): Promise<string | null> {
+  if (thumbCache.has(path)) return thumbCache.get(path)!;
+  if (!(await ensureTauri())) return null;
+  try {
+    const result = (await invoke!("get_thumbnail", { path })) as string | null;
+    thumbCache.set(path, result);
+    return result;
+  } catch {
+    thumbCache.set(path, null);
+    return null;
   }
 }
 

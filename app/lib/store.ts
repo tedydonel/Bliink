@@ -43,6 +43,14 @@ export interface TransferItem {
   // Short code derived from the session key — matches on both screens
   // unless someone is intercepting the connection
   verificationCode?: string | null;
+  // Small JPEG preview as a data URL
+  thumbnail?: string | null;
+  // Set when this transfer is part of a multi-file batch
+  batchId?: string | null;
+  // Folder name for folder batches; null for loose-file batches
+  batchName?: string | null;
+  batchTotalFiles?: number | null;
+  batchTotalBytes?: number | null;
 }
 
 // An incoming file offer awaiting the user's accept/decline decision
@@ -59,6 +67,7 @@ export interface TransferRequest {
   batchName?: string | null;
   batchTotalFiles?: number | null;
   batchTotalBytes?: number | null;
+  thumbnail?: string | null;
 }
 
 // ─── History Types ──────────────────────────────────────────────
@@ -74,6 +83,9 @@ export interface HistoryEntry {
   startedAt: number;
   completedAt: number;
   hash?: string;
+  thumbnail?: string | null;
+  batchId?: string | null;
+  batchName?: string | null;
 }
 
 // ─── Settings Types ─────────────────────────────────────────────

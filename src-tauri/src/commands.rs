@@ -15,6 +15,7 @@ pub struct AppState {
     pub settings: Arc<Mutex<AppSettings>>,
     pub device_id: String,
     pub config_path: PathBuf,
+    pub thumb_cache_dir: PathBuf,
 }
 
 impl AppState {
@@ -87,6 +88,35 @@ pub async fn send_file(
         .await?;
 
     Ok(transfer_id)
+}
+
+/// Send multiple files as one batch — the receiver is prompted once.
+/// Returns the number of files queued.
+#[tauri::command]
+pub async fn send_files(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    device_ip: String,
+    device_port: u16,
+    device_id: String,
+    device_name: String,
+) -> Result<u32, String> {
+    let settings = state.settings.lock().await;
+    let sender_name = settings.device_name.clone();
+    drop(settings);
+
+    state
+        .transfer
+        .send_files(
+            paths,
+            &device_ip,
+            device_port,
+            &device_id,
+            &device_name,
+            &state.device_id,
+            &sender_name,
+        )
+        .await
 }
 
 /// Send every file in a folder as one batch — the receiver is prompted once.
@@ -245,6 +275,22 @@ pub async fn get_device_info(state: State<'_, AppState>) -> Result<serde_json::V
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
     }))
+}
+
+/// Thumbnail for a local file as a JPEG data URL (disk-cached), or null if
+/// the file type has no preview.
+#[tauri::command]
+pub async fn get_thumbnail(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Option<String>, String> {
+    Ok(crate::thumbs::cached_thumbnail_data_url(
+        &state.thumb_cache_dir,
+        std::path::Path::new(&path),
+        256,
+        70,
+    )
+    .await)
 }
 
 #[tauri::command]

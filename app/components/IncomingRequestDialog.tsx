@@ -49,55 +49,72 @@ function RequestCard({
 }) {
   const [codeConfirmed, setCodeConfirmed] = useState(false);
   const canAccept = !request.requireCodeConfirm || codeConfirmed;
-  const isBatch = !!request.batchName;
+  const isBatch = (request.batchTotalFiles ?? 0) > 1;
+  const isFolder = isBatch && !!request.batchName;
+  const title = isFolder
+    ? "Incoming folder"
+    : isBatch
+    ? "Incoming files"
+    : "Incoming file";
+  const what = isFolder ? "a folder" : isBatch ? "files" : "a file";
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
       <div className="w-[400px] p-6 rounded-2xl bg-surface border border-border shadow-2xl">
         <div className="flex items-center gap-4 mb-5">
           <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-accent/10 border border-accent/20 shrink-0">
-            {isBatch ? (
+            {isFolder ? (
               <FolderDown className="w-6 h-6 text-accent" />
             ) : (
               <Download className="w-6 h-6 text-accent" />
             )}
           </div>
           <div className="min-w-0">
-            <p className="text-[15px] font-bold text-foreground">
-              {isBatch ? "Incoming folder" : "Incoming file"}
-            </p>
+            <p className="text-[15px] font-bold text-foreground">{title}</p>
             <p className="text-[12px] text-muted mt-0.5">
               <span className="font-semibold text-muted-light">
                 {request.senderName}
               </span>{" "}
-              wants to send you {isBatch ? "a folder" : "a file"}
+              wants to send you {what}
             </p>
           </div>
         </div>
 
-        <div className="px-4 py-3 rounded-xl bg-surface-active/50 border border-border mb-4">
-          {isBatch ? (
-            <>
-              <p className="text-[13px] font-semibold text-foreground truncate">
-                {request.batchName}
-              </p>
-              <p className="text-[11px] text-muted mt-0.5">
-                {request.batchTotalFiles ?? "?"} files
-                {request.batchTotalBytes
-                  ? ` · ${formatBytes(request.batchTotalBytes)}`
-                  : ""}
-              </p>
-            </>
-          ) : (
-            <>
-              <p className="text-[13px] font-semibold text-foreground truncate">
-                {request.fileName}
-              </p>
-              <p className="text-[11px] text-muted mt-0.5">
-                {formatBytes(request.fileSize)}
-              </p>
-            </>
+        <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-surface-active/50 border border-border mb-4">
+          {request.thumbnail && (
+            <span className="w-12 h-12 rounded-lg overflow-hidden shrink-0 bg-surface-active">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={request.thumbnail}
+                alt=""
+                className="w-12 h-12 object-cover"
+              />
+            </span>
           )}
+          <div className="min-w-0">
+            {isBatch ? (
+              <>
+                <p className="text-[13px] font-semibold text-foreground truncate">
+                  {request.batchName ?? `${request.batchTotalFiles} files`}
+                </p>
+                <p className="text-[11px] text-muted mt-0.5">
+                  {request.batchTotalFiles} files
+                  {request.batchTotalBytes
+                    ? ` · ${formatBytes(request.batchTotalBytes)}`
+                    : ""}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-[13px] font-semibold text-foreground truncate">
+                  {request.fileName}
+                </p>
+                <p className="text-[11px] text-muted mt-0.5">
+                  {formatBytes(request.fileSize)}
+                </p>
+              </>
+            )}
+          </div>
         </div>
 
         {/* Verification code — matches the sender's screen unless someone

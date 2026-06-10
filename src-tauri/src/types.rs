@@ -70,6 +70,19 @@ pub struct TransferItem {
     /// both screens rule out a man-in-the-middle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification_code: Option<String>,
+    /// Small JPEG preview as a data URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
+    /// Set when this transfer is part of a multi-file batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    /// Folder name for folder batches; None for loose-file batches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_total_files: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_total_bytes: Option<u64>,
 }
 
 /// Emitted to the frontend when a remote device offers a file and
@@ -92,6 +105,8 @@ pub struct TransferRequest {
     pub batch_name: Option<String>,
     pub batch_total_files: Option<u32>,
     pub batch_total_bytes: Option<u64>,
+    /// Small JPEG preview of the offered file, if the sender provided one.
+    pub thumbnail: Option<String>,
 }
 
 /// Emitted to the sender's frontend once the session is established so the
@@ -117,6 +132,12 @@ pub struct HistoryEntry {
     pub started_at: i64,
     pub completed_at: i64,
     pub hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

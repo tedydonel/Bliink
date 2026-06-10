@@ -12,8 +12,10 @@ import {
   Music,
   Archive,
   Folder,
+  Files,
   CheckCircle2,
   XCircle,
+  ChevronDown,
   Filter,
   Trash2,
 } from "lucide-react";
@@ -25,6 +27,11 @@ import * as api from "@/app/lib/tauri-api";
 type FilterDirection = "all" | "upload" | "download";
 type FilterStatus = "all" | "completed" | "failed" | "cancelled";
 
+// A renderable history row: a lone transfer or a collapsible batch
+type HistoryRow =
+  | { kind: "single"; key: string; entry: HistoryEntry }
+  | { kind: "batch"; key: string; entries: HistoryEntry[] };
+
 function getFileIconComponent(fileType: string) {
   if (fileType.startsWith("image/")) return ImageIcon;
   if (fileType.startsWith("video/")) return Film;
@@ -34,6 +41,30 @@ function getFileIconComponent(fileType: string) {
     return Archive;
   if (fileType.includes("folder")) return Folder;
   return File;
+}
+
+function clusterBatches(entries: HistoryEntry[]): HistoryRow[] {
+  const groups = new Map<string, HistoryEntry[]>();
+  const rows: HistoryRow[] = [];
+  for (const entry of entries) {
+    if (entry.batchId) {
+      let group = groups.get(entry.batchId);
+      if (!group) {
+        group = [];
+        groups.set(entry.batchId, group);
+        rows.push({ kind: "batch", key: entry.batchId, entries: group });
+      }
+      group.push(entry);
+    } else {
+      rows.push({ kind: "single", key: entry.id, entry });
+    }
+  }
+  // A "batch" of one renders as a normal row
+  return rows.map((row) =>
+    row.kind === "batch" && row.entries.length === 1
+      ? { kind: "single", key: row.entries[0].id, entry: row.entries[0] }
+      : row
+  );
 }
 
 export default function HistoryPage() {
@@ -154,54 +185,13 @@ export default function HistoryPage() {
               {date}
             </h3>
             <div className="flex flex-col gap-1.5">
-              {entries.map((entry) => {
-                const FileIcon = getFileIconComponent(entry.fileType);
-                return (
-                  <div
-                    key={entry.id}
-                    className="flex items-center gap-4 px-4 py-3 rounded-xl border border-border bg-surface hover:bg-surface-hover transition-all"
-                  >
-                    <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-surface-active shrink-0">
-                      <FileIcon className="w-[18px] h-[18px] text-muted-light" />
-                    </div>
-
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        {entry.direction === "upload" ? (
-                          <ArrowUp className="w-3.5 h-3.5 text-accent shrink-0" />
-                        ) : (
-                          <ArrowDown className="w-3.5 h-3.5 text-sky shrink-0" />
-                        )}
-                        <span className="text-[13px] font-semibold text-foreground truncate">
-                          {entry.fileName}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2 mt-0.5">
-                        <span className="text-[11px] text-muted">{formatBytes(entry.fileSize)}</span>
-                        <span className="text-[11px] text-border-bright">→</span>
-                        <span className="text-[11px] text-muted">{entry.deviceName}</span>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-col items-end gap-1 shrink-0">
-                      <div className="flex items-center gap-1.5">
-                        {entry.status === "completed" && <CheckCircle2 className="w-3.5 h-3.5 text-success" />}
-                        {entry.status === "failed" && <XCircle className="w-3.5 h-3.5 text-danger" />}
-                        {entry.status === "cancelled" && <XCircle className="w-3.5 h-3.5 text-warning" />}
-                        <span
-                          className={cn(
-                            "text-[11px] font-semibold capitalize",
-                            entry.status === "completed" ? "text-success" : entry.status === "failed" ? "text-danger" : "text-warning"
-                          )}
-                        >
-                          {entry.status}
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-muted">{formatRelativeTime(entry.completedAt)}</span>
-                    </div>
-                  </div>
-                );
-              })}
+              {clusterBatches(entries).map((row) =>
+                row.kind === "single" ? (
+                  <HistoryEntryRow key={row.key} entry={row.entry} />
+                ) : (
+                  <HistoryBatchRow key={row.key} entries={row.entries} />
+                )
+              )}
             </div>
           </div>
         ))}
@@ -225,6 +215,135 @@ export default function HistoryPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: HistoryEntry["status"] }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      {status === "completed" && <CheckCircle2 className="w-3.5 h-3.5 text-success" />}
+      {status === "failed" && <XCircle className="w-3.5 h-3.5 text-danger" />}
+      {status === "cancelled" && <XCircle className="w-3.5 h-3.5 text-warning" />}
+      <span
+        className={cn(
+          "text-[11px] font-semibold capitalize",
+          status === "completed" ? "text-success" : status === "failed" ? "text-danger" : "text-warning"
+        )}
+      >
+        {status}
+      </span>
+    </div>
+  );
+}
+
+function HistoryEntryRow({ entry }: { entry: HistoryEntry }) {
+  const FileIcon = getFileIconComponent(entry.fileType);
+  return (
+    <div className="flex items-center gap-4 px-4 py-3 rounded-xl border border-border bg-surface hover:bg-surface-hover transition-all">
+      <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-surface-active shrink-0 overflow-hidden">
+        {entry.thumbnail ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={entry.thumbnail} alt="" className="w-10 h-10 object-cover" />
+        ) : (
+          <FileIcon className="w-[18px] h-[18px] text-muted-light" />
+        )}
+      </div>
+
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          {entry.direction === "upload" ? (
+            <ArrowUp className="w-3.5 h-3.5 text-accent shrink-0" />
+          ) : (
+            <ArrowDown className="w-3.5 h-3.5 text-sky shrink-0" />
+          )}
+          <span className="text-[13px] font-semibold text-foreground truncate">
+            {entry.fileName}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 mt-0.5">
+          <span className="text-[11px] text-muted">{formatBytes(entry.fileSize)}</span>
+          <span className="text-[11px] text-border-bright">→</span>
+          <span className="text-[11px] text-muted">{entry.deviceName}</span>
+        </div>
+      </div>
+
+      <div className="flex flex-col items-end gap-1 shrink-0">
+        <StatusBadge status={entry.status} />
+        <span className="text-[10px] text-muted">{formatRelativeTime(entry.completedAt)}</span>
+      </div>
+    </div>
+  );
+}
+
+function HistoryBatchRow({ entries }: { entries: HistoryEntry[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const first = entries[0];
+  const totalBytes = entries.reduce((acc, e) => acc + e.fileSize, 0);
+  const failedCount = entries.filter((e) => e.status !== "completed").length;
+  const overall: HistoryEntry["status"] =
+    failedCount === 0 ? "completed" : failedCount === entries.length ? "failed" : "completed";
+  const name = first.batchName ?? `${entries.length} files`;
+  const thumb = entries.find((e) => e.thumbnail)?.thumbnail;
+  const isFolder = !!first.batchName;
+
+  return (
+    <div className="rounded-xl border border-border bg-surface transition-all">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-center gap-4 px-4 py-3 w-full text-left hover:bg-surface-hover transition-all rounded-xl"
+      >
+        <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-surface-active shrink-0 overflow-hidden">
+          {thumb ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={thumb} alt="" className="w-10 h-10 object-cover" />
+          ) : isFolder ? (
+            <Folder className="w-[18px] h-[18px] text-muted-light" />
+          ) : (
+            <Files className="w-[18px] h-[18px] text-muted-light" />
+          )}
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            {first.direction === "upload" ? (
+              <ArrowUp className="w-3.5 h-3.5 text-accent shrink-0" />
+            ) : (
+              <ArrowDown className="w-3.5 h-3.5 text-sky shrink-0" />
+            )}
+            <span className="text-[13px] font-semibold text-foreground truncate">{name}</span>
+          </div>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-[11px] text-muted">
+              {entries.length} files · {formatBytes(totalBytes)}
+            </span>
+            <span className="text-[11px] text-border-bright">→</span>
+            <span className="text-[11px] text-muted">{first.deviceName}</span>
+            {failedCount > 0 && failedCount < entries.length && (
+              <span className="text-[11px] text-danger">{failedCount} failed</span>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          <StatusBadge status={overall} />
+          <span className="text-[10px] text-muted">{formatRelativeTime(first.completedAt)}</span>
+        </div>
+        <ChevronDown
+          className={cn(
+            "w-4 h-4 text-muted transition-transform duration-200 shrink-0",
+            expanded ? "rotate-180" : ""
+          )}
+        />
+      </button>
+
+      {expanded && (
+        <div className="flex flex-col gap-1.5 px-4 pb-3 pl-9 animate-fade-in">
+          {entries.map((entry) => (
+            <HistoryEntryRow key={entry.id} entry={entry} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

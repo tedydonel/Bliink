@@ -25,13 +25,26 @@ impl HistoryStore {
                 status TEXT NOT NULL,
                 started_at INTEGER NOT NULL,
                 completed_at INTEGER NOT NULL,
-                hash TEXT
+                hash TEXT,
+                thumbnail TEXT,
+                batch_id TEXT,
+                batch_name TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_history_completed_at ON history(completed_at DESC);
             CREATE INDEX IF NOT EXISTS idx_history_device_id ON history(device_id);
             CREATE INDEX IF NOT EXISTS idx_history_status ON history(status);",
         )
         .map_err(|e| format!("Failed to create tables: {}", e))?;
+
+        // Migrate databases created before these columns existed; the
+        // "duplicate column" error on re-runs is expected and ignored.
+        for stmt in [
+            "ALTER TABLE history ADD COLUMN thumbnail TEXT",
+            "ALTER TABLE history ADD COLUMN batch_id TEXT",
+            "ALTER TABLE history ADD COLUMN batch_name TEXT",
+        ] {
+            let _ = conn.execute(stmt, []);
+        }
 
         info!("History database initialized at {:?}", db_path);
         Ok(Self {
@@ -48,8 +61,8 @@ impl HistoryStore {
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT OR REPLACE INTO history
-                (id, file_name, file_size, file_type, direction, device_id, device_name, status, started_at, completed_at, hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                (id, file_name, file_size, file_type, direction, device_id, device_name, status, started_at, completed_at, hash, thumbnail, batch_id, batch_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 entry.id,
                 entry.file_name,
@@ -62,6 +75,9 @@ impl HistoryStore {
                 entry.started_at,
                 entry.completed_at,
                 entry.hash,
+                entry.thumbnail,
+                entry.batch_id,
+                entry.batch_name,
             ],
         )
         .map_err(|e| format!("Failed to insert history: {}", e))?;
@@ -78,7 +94,7 @@ impl HistoryStore {
         status: Option<&str>,
     ) -> Result<Vec<HistoryEntry>, String> {
         let mut sql = String::from(
-            "SELECT id, file_name, file_size, file_type, direction, device_id, device_name, status, started_at, completed_at, hash FROM history WHERE 1=1",
+            "SELECT id, file_name, file_size, file_type, direction, device_id, device_name, status, started_at, completed_at, hash, thumbnail, batch_id, batch_name FROM history WHERE 1=1",
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql + Send>> = Vec::new();
 
@@ -136,6 +152,9 @@ impl HistoryStore {
                         started_at: row.get(8)?,
                         completed_at: row.get(9)?,
                         hash: row.get(10)?,
+                        thumbnail: row.get(11)?,
+                        batch_id: row.get(12)?,
+                        batch_name: row.get(13)?,
                     })
                 },
             )

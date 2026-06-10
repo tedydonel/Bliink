@@ -1,13 +1,28 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { Inbox, Upload, X, Monitor, CheckCircle2, AlertCircle } from "lucide-react";
-import { useAppStore } from "@/app/lib/store";
+import { useState, useCallback, useMemo } from "react";
+import { Inbox, Upload, X, Monitor, CheckCircle2, AlertCircle, File, Folder } from "lucide-react";
+import { useAppStore, type TransferItem } from "@/app/lib/store";
 import TransferItemCard from "@/app/components/TransferItem";
+import TransferGroupCard from "@/app/components/TransferGroup";
+import FileThumb from "@/app/components/FileThumb";
 import FileDropZone, { type SelectedFile } from "@/app/components/FileDropZone";
 import { formatBytes } from "@/app/lib/utils";
 import { cn } from "@/app/lib/utils";
 import * as api from "@/app/lib/tauri-api";
+
+const ACTIVE_STATUSES = ["pending", "transferring", "paused"];
+
+// A renderable row: either a lone transfer or a collapsible batch
+type Entry =
+  | { kind: "single"; key: string; item: TransferItem }
+  | { kind: "group"; key: string; items: TransferItem[] };
+
+function entryIsActive(entry: Entry): boolean {
+  return entry.kind === "single"
+    ? ACTIVE_STATUSES.includes(entry.item.status)
+    : entry.items.some((t) => ACTIVE_STATUSES.includes(t.status));
+}
 
 export default function TransferPage() {
   const {
@@ -24,18 +39,28 @@ export default function TransferPage() {
 
   const onlineDevices = devices.filter((d) => d.status !== "offline");
 
-  const active = transfers.filter(
-    (t) =>
-      t.status === "transferring" ||
-      t.status === "pending" ||
-      t.status === "paused"
-  );
-  const completed = transfers.filter(
-    (t) =>
-      t.status === "completed" ||
-      t.status === "failed" ||
-      t.status === "cancelled"
-  );
+  // Cluster batch members under one collapsible entry
+  const entries = useMemo(() => {
+    const groups = new Map<string, TransferItem[]>();
+    const list: Entry[] = [];
+    for (const t of transfers) {
+      if (t.batchId) {
+        let group = groups.get(t.batchId);
+        if (!group) {
+          group = [];
+          groups.set(t.batchId, group);
+          list.push({ kind: "group", key: t.batchId, items: group });
+        }
+        group.push(t);
+      } else {
+        list.push({ kind: "single", key: t.id, item: t });
+      }
+    }
+    return list;
+  }, [transfers]);
+
+  const active = entries.filter(entryIsActive);
+  const completed = entries.filter((e) => !entryIsActive(e));
 
   const handleFilesSelected = useCallback((files: SelectedFile[]) => {
     setSelectedFiles((prev) => [...prev, ...files]);
@@ -85,46 +110,63 @@ export default function TransferPage() {
       return;
     }
 
-    for (const file of selectedFiles) {
-      if (!file.path) continue;
-      for (const device of targetDevices) {
+    const files = selectedFiles.filter((f) => !f.isDir && f.path);
+    const folders = selectedFiles.filter((f) => f.isDir && f.path);
+
+    for (const device of targetDevices) {
+      // Folders each go as their own batch; transfers appear via the
+      // global listener as each file starts
+      for (const folder of folders) {
         try {
-          if (file.isDir) {
-            // Folder batch — individual transfers appear via the global
-            // listener as each file starts
-            await api.sendFolder(
-              file.path,
-              device.ip,
-              device.port,
-              device.id,
-              device.name
-            );
-          } else {
-            const transferId = await api.sendFile(
-              file.path,
-              device.ip,
-              device.port,
-              device.id,
-              device.name
-            );
-            upsertTransfer({
-              id: transferId,
-              fileName: file.name,
-              fileSize: file.size,
-              fileType: file.type || "application/octet-stream",
-              progress: 0,
-              speed: 0,
-              status: "pending",
-              direction: "upload",
-              deviceId: device.id,
-              deviceName: device.name,
-              startedAt: Date.now(),
-            });
-          }
+          await api.sendFolder(
+            folder.path,
+            device.ip,
+            device.port,
+            device.id,
+            device.name
+          );
         } catch (e: any) {
           console.error("Send error:", e);
-          setSendError(`Failed to send ${file.name}: ${e?.message || e}`);
+          setSendError(`Failed to send ${folder.name}: ${e?.message || e}`);
         }
+      }
+
+      try {
+        if (files.length === 1) {
+          const file = files[0];
+          const transferId = await api.sendFile(
+            file.path,
+            device.ip,
+            device.port,
+            device.id,
+            device.name
+          );
+          upsertTransfer({
+            id: transferId,
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type || "application/octet-stream",
+            progress: 0,
+            speed: 0,
+            status: "pending",
+            direction: "upload",
+            deviceId: device.id,
+            deviceName: device.name,
+            startedAt: Date.now(),
+          });
+        } else if (files.length > 1) {
+          // Multi-file selection goes as one batch — receiver prompts once
+          await api.sendFiles(
+            files.map((f) => f.path),
+            device.ip,
+            device.port,
+            device.id,
+            device.name
+          );
+        }
+      } catch (e: any) {
+        console.error("Send error:", e);
+        setSendError(`Failed to send files: ${e?.message || e}`);
       }
     }
     setSelectedFiles([]);
@@ -185,6 +227,19 @@ export default function TransferPage() {
                   key={i}
                   className="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface border border-border text-[12px] group"
                 >
+                  <span className="flex items-center justify-center w-6 h-6 rounded overflow-hidden bg-surface-active shrink-0">
+                    <FileThumb
+                      path={file.isDir ? undefined : file.path}
+                      className="w-6 h-6 object-cover"
+                      fallback={
+                        file.isDir ? (
+                          <Folder className="w-3.5 h-3.5 text-muted" />
+                        ) : (
+                          <File className="w-3.5 h-3.5 text-muted" />
+                        )
+                      }
+                    />
+                  </span>
                   <span className="text-foreground font-medium truncate max-w-[200px]">
                     {file.name}
                   </span>
@@ -252,14 +307,23 @@ export default function TransferPage() {
               Active — {active.length}
             </h2>
             <div className="flex flex-col gap-2">
-              {active.map((transfer, i) => (
-                <div key={transfer.id} className="animate-fade-in" style={{ animationDelay: `${i * 40}ms` }}>
-                  <TransferItemCard
-                    transfer={transfer}
-                    onPause={handlePause}
-                    onResume={handleResume}
-                    onCancel={handleCancel}
-                  />
+              {active.map((entry, i) => (
+                <div key={entry.key} className="animate-fade-in" style={{ animationDelay: `${i * 40}ms` }}>
+                  {entry.kind === "single" ? (
+                    <TransferItemCard
+                      transfer={entry.item}
+                      onPause={handlePause}
+                      onResume={handleResume}
+                      onCancel={handleCancel}
+                    />
+                  ) : (
+                    <TransferGroupCard
+                      items={entry.items}
+                      onPause={handlePause}
+                      onResume={handleResume}
+                      onCancel={handleCancel}
+                    />
+                  )}
                 </div>
               ))}
             </div>
@@ -273,9 +337,13 @@ export default function TransferPage() {
               Completed — {completed.length}
             </h2>
             <div className="flex flex-col gap-2">
-              {completed.map((transfer) => (
-                <TransferItemCard key={transfer.id} transfer={transfer} />
-              ))}
+              {completed.map((entry) =>
+                entry.kind === "single" ? (
+                  <TransferItemCard key={entry.key} transfer={entry.item} />
+                ) : (
+                  <TransferGroupCard key={entry.key} items={entry.items} />
+                )
+              )}
             </div>
           </div>
         )}
