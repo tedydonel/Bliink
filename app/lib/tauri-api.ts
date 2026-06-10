@@ -391,6 +391,25 @@ export async function onChatConversations(
   return listen!("chat-conversations", () => handler());
 }
 
+// ─── Calls (signaling rides the chat channel) ───────────────────
+
+export async function sendCallSignal(
+  deviceId: string,
+  payload: unknown
+): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("send_call_signal", { deviceId, payload });
+}
+
+export async function onCallSignal(
+  handler: (event: { deviceId: string; payload: unknown }) => void
+): Promise<() => void> {
+  if (!(await ensureTauri())) return () => {};
+  return listen!("call-signal", (event) => {
+    handler(event.payload as { deviceId: string; payload: unknown });
+  });
+}
+
 // ─── Thumbnails ─────────────────────────────────────────────────
 
 const thumbCache = new Map<string, string | null>();

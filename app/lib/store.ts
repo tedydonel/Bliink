@@ -116,6 +116,29 @@ export interface Conversation {
   online: boolean;
 }
 
+// ─── Call Types ─────────────────────────────────────────────────
+export interface CallState {
+  status: "idle" | "incoming" | "outgoing" | "connecting" | "active" | "ended";
+  peerId: string | null;
+  peerName: string | null;
+  // Set when the call connects; drives the duration timer
+  startedAt: number | null;
+  muted: boolean;
+  // Outgoing: the remote device confirmed it's ringing
+  ringing: boolean;
+  endedReason: string | null;
+}
+
+export const IDLE_CALL: CallState = {
+  status: "idle",
+  peerId: null,
+  peerName: null,
+  startedAt: null,
+  muted: false,
+  ringing: false,
+  endedReason: null,
+};
+
 // ─── Settings Types ─────────────────────────────────────────────
 export interface AppSettings {
   downloadPath: string;
@@ -169,6 +192,11 @@ interface AppState {
   upsertChatMessage: (message: ChatMessage) => void;
   typingPeers: Record<string, boolean>;
   setPeerTyping: (deviceId: string, typing: boolean) => void;
+
+  // Calls
+  callState: CallState;
+  setCallState: (updates: Partial<CallState>) => void;
+  resetCallState: () => void;
 
   // Settings
   settings: AppSettings;
@@ -273,6 +301,12 @@ export const useAppStore = create<AppState>((set) => ({
   typingPeers: {},
   setPeerTyping: (deviceId, typing) =>
     set((s) => ({ typingPeers: { ...s.typingPeers, [deviceId]: typing } })),
+
+  // ── Calls ──
+  callState: IDLE_CALL,
+  setCallState: (updates) =>
+    set((s) => ({ callState: { ...s.callState, ...updates } })),
+  resetCallState: () => set({ callState: IDLE_CALL }),
 
   // ── Settings ──
   settings: {

@@ -6,6 +6,7 @@ import Sidebar from "./components/Sidebar";
 import TransferListener from "./components/TransferListener";
 import ChatListener from "./components/ChatListener";
 import IncomingRequestDialog from "./components/IncomingRequestDialog";
+import CallOverlay from "./components/CallOverlay";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -35,6 +36,7 @@ export default function RootLayout({
         <TransferListener />
         <ChatListener />
         <IncomingRequestDialog />
+        <CallOverlay />
         <TitleBar />
         <div className="flex flex-1 overflow-hidden">
           <Sidebar />

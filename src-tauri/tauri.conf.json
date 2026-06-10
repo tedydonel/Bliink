@@ -21,7 +21,8 @@
         "fullscreen": false,
         "decorations": false,
         "center": true,
-        "dragDropEnabled": true
+        "dragDropEnabled": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,WebRtcHideLocalIpsWithMdns"
       }
     ],
     "security": {

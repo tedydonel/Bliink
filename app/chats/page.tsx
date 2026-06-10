@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { MessageCircle, Monitor, Search } from "lucide-react";
+import { MessageCircle, Monitor, Phone, Search } from "lucide-react";
 import MessageBubble from "@/app/components/chat/MessageBubble";
 import ChatInput from "@/app/components/chat/ChatInput";
 import { useAppStore, type ChatMessage, type Conversation } from "@/app/lib/store";
+import { callManager } from "@/app/lib/call-manager";
 import { cn, formatRelativeTime } from "@/app/lib/utils";
 import * as api from "@/app/lib/tauri-api";
 
@@ -17,6 +18,7 @@ export default function ChatsPage() {
     upsertChatMessage,
     typingPeers,
     devices,
+    callState,
   } = useAppStore();
 
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -213,7 +215,7 @@ export default function ChatsPage() {
                 <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-success border-2 border-background" />
               )}
             </div>
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <p className="text-[14px] font-bold text-foreground truncate">{activeName}</p>
               <p className="text-[11px] text-muted">
                 {typingPeers[activeId] ? (
@@ -225,6 +227,26 @@ export default function ChatsPage() {
                 )}
               </p>
             </div>
+            <button
+              onClick={() => callManager.startCall(activeId, activeName)}
+              disabled={!activeOnline || callState.status !== "idle"}
+              className={cn(
+                "flex items-center justify-center w-9 h-9 rounded-lg transition-colors shrink-0",
+                activeOnline && callState.status === "idle"
+                  ? "text-accent hover:bg-accent/10 border border-accent/20"
+                  : "text-muted/40 border border-border cursor-not-allowed"
+              )}
+              aria-label="Start audio call"
+              title={
+                !activeOnline
+                  ? "Device is offline"
+                  : callState.status !== "idle"
+                  ? "Already in a call"
+                  : "Start audio call"
+              }
+            >
+              <Phone className="w-4 h-4" />
+            </button>
           </div>
 
           {/* Messages */}
