@@ -21,6 +21,21 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::Mutex;
 
+/// Bind a TCP listener on the preferred port, falling back to a random
+/// one (remote dial-in won't work then, but LAN still does).
+fn bind_listener(preferred_port: u16, label: &str) -> std::net::TcpListener {
+    if preferred_port != 0 {
+        match std::net::TcpListener::bind(("0.0.0.0", preferred_port)) {
+            Ok(listener) => return listener,
+            Err(e) => log::warn!(
+                "{} port {} unavailable ({}); falling back to a random port — remote devices won't be able to dial in this session",
+                label, preferred_port, e
+            ),
+        }
+    }
+    std::net::TcpListener::bind("0.0.0.0:0").expect("Failed to bind listener")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -44,9 +59,9 @@ pub fn run() {
             let device_id = persisted.device_id.clone();
             let device_name = settings.device_name.clone();
 
-            // Bind transfer listener to a dynamic port
-            let listener = std::net::TcpListener::bind("0.0.0.0:0")
-                .expect("Failed to bind transfer listener");
+            // Bind listeners — fixed ports (settings) so remote peers can
+            // dial in, falling back to random if taken
+            let listener = bind_listener(settings.transfer_port, "transfer");
             listener
                 .set_nonblocking(true)
                 .expect("Failed to set nonblocking");
@@ -55,9 +70,7 @@ pub fn run() {
                 .expect("Failed to get local address")
                 .port();
 
-            // Bind chat channel listener to a dynamic port
-            let chat_listener = std::net::TcpListener::bind("0.0.0.0:0")
-                .expect("Failed to bind chat listener");
+            let chat_listener = bind_listener(settings.chat_port, "chat");
             chat_listener
                 .set_nonblocking(true)
                 .expect("Failed to set nonblocking");
@@ -248,6 +261,7 @@ pub fn run() {
             let chat_service = Arc::new(ChatService::new(
                 device_id.clone(),
                 device_name.clone(),
+                service_port,
                 chat_store,
                 discovery.clone(),
                 transfer.clone(),
@@ -330,15 +344,27 @@ pub fn run() {
             let thumb_cache_dir = data_dir.join("thumbnails");
             let _ = std::fs::create_dir_all(&thumb_cache_dir);
 
+            // Reconnect to saved remote devices in the background
+            if !persisted.manual_devices.is_empty() {
+                commands::spawn_manual_probes(
+                    chat_service.clone(),
+                    discovery.clone(),
+                    persisted.manual_devices.clone(),
+                );
+            }
+
             app.manage(AppState {
                 discovery,
                 transfer,
                 chat: chat_service,
                 history,
                 settings: settings_state,
+                manual_devices: Arc::new(Mutex::new(persisted.manual_devices.clone())),
                 device_id,
                 config_path,
                 thumb_cache_dir,
+                transfer_port: service_port,
+                chat_port,
             });
 
             info!("Bliink backend initialized");
@@ -364,6 +390,9 @@ pub fn run() {
             commands::get_device_info,
             commands::get_file_metadata,
             commands::get_thumbnail,
+            commands::add_manual_device,
+            commands::remove_manual_device,
+            commands::get_network_info,
             commands::get_conversations,
             commands::get_chat_messages,
             commands::send_chat_message,

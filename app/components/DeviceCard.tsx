@@ -10,6 +10,9 @@ import {
   WifiOff,
   Check,
   ArrowUpDown,
+  Globe,
+  AlertTriangle,
+  X,
 } from "lucide-react";
 import { cn } from "@/app/lib/utils";
 import type { Device, DeviceStatus, DeviceType } from "@/app/lib/store";
@@ -42,6 +45,7 @@ interface DeviceCardProps {
   selected?: boolean;
   onSelect?: (id: string) => void;
   onConnect?: (id: string) => void;
+  onRemove?: (id: string) => void;
 }
 
 export default function DeviceCard({
@@ -49,18 +53,22 @@ export default function DeviceCard({
   selected = false,
   onSelect,
   onConnect,
+  onRemove,
 }: DeviceCardProps) {
   const DeviceIcon = deviceIcons[device.deviceType] || Monitor;
   const status = statusConfig[device.status];
   const StatusIcon = status.icon;
+  const incompatible = device.compatible === false;
 
   return (
     <button
-      onClick={() => onSelect?.(device.id)}
-      onDoubleClick={() => onConnect?.(device.id)}
+      onClick={() => !incompatible && onSelect?.(device.id)}
+      onDoubleClick={() => !incompatible && onConnect?.(device.id)}
       className={cn(
         "flex items-center gap-4 w-full p-4 rounded-xl border transition-all duration-150 text-left group",
-        selected
+        incompatible
+          ? "bg-surface border-border opacity-60 cursor-not-allowed"
+          : selected
           ? "bg-accent-dim border-accent/30"
           : "bg-surface border-border hover:border-border-bright hover:bg-surface-hover"
       )}
@@ -86,7 +94,16 @@ export default function DeviceCard({
           <span className="text-sm font-semibold text-foreground truncate">
             {device.name}
           </span>
-          {selected && (
+          {device.manual && (
+            <span
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-sky/10 border border-sky/20 text-sky text-[10px] font-semibold shrink-0"
+              title="Added by address"
+            >
+              <Globe className="w-2.5 h-2.5" />
+              Remote
+            </span>
+          )}
+          {selected && !incompatible && (
             <Check className="w-3.5 h-3.5 text-accent shrink-0" />
           )}
         </div>
@@ -102,12 +119,35 @@ export default function DeviceCard({
       </div>
 
       {/* Status */}
-      <div className="flex items-center gap-1.5 shrink-0">
-        <span className={cn("w-1.5 h-1.5 rounded-full", status.bg)} />
-        <span className={cn("text-xs font-medium", status.color)}>
-          {status.label}
+      {incompatible ? (
+        <div className="flex items-center gap-1.5 shrink-0" title="This device runs a different Bliink version — update both devices">
+          <AlertTriangle className="w-3.5 h-3.5 text-warning" />
+          <span className="text-xs font-medium text-warning">Update required</span>
+        </div>
+      ) : (
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className={cn("w-1.5 h-1.5 rounded-full", status.bg)} />
+          <span className={cn("text-xs font-medium", status.color)}>
+            {status.label}
+          </span>
+        </div>
+      )}
+
+      {/* Remove (manual devices only) */}
+      {device.manual && onRemove && (
+        <span
+          role="button"
+          aria-label="Remove device"
+          title="Remove this device"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove(device.id);
+          }}
+          className="p-1.5 rounded-lg text-muted opacity-0 group-hover:opacity-100 hover:bg-danger-dim hover:text-danger transition-all shrink-0"
+        >
+          <X className="w-3.5 h-3.5" />
         </span>
-      </div>
+      )}
     </button>
   );
 }

@@ -1,7 +1,9 @@
 use crate::crypto::SecureStream;
 use crate::discovery::DiscoveryService;
 use crate::transfer::TransferEngine;
-use crate::types::{ChatMessage, Conversation, TransferStatus, TypingEvent};
+use crate::types::{
+    ChatMessage, Conversation, Device, DeviceStatus, DeviceType, TransferStatus, TypingEvent,
+};
 use log::{error, info, warn};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,12 @@ pub enum ChatWire {
     Hello {
         device_id: String,
         device_name: String,
+        #[serde(default)]
+        protocol: u32,
+        /// The peer's transfer listener port, so manually-added devices can
+        /// receive files without broadcast discovery.
+        #[serde(default)]
+        transfer_port: u16,
     },
     Message {
         id: String,
@@ -342,6 +350,8 @@ struct Channel {
 pub struct ChatService {
     device_id: String,
     device_name: String,
+    /// Our transfer listener port, shared in the hello.
+    transfer_port: u16,
     store: Arc<ChatStore>,
     discovery: Arc<Mutex<DiscoveryService>>,
     transfer: Arc<TransferEngine>,
@@ -357,6 +367,7 @@ impl ChatService {
     pub fn new(
         device_id: String,
         device_name: String,
+        transfer_port: u16,
         store: Arc<ChatStore>,
         discovery: Arc<Mutex<DiscoveryService>>,
         transfer: Arc<TransferEngine>,
@@ -366,6 +377,7 @@ impl ChatService {
         Self {
             device_id,
             device_name,
+            transfer_port,
             store,
             discovery,
             transfer,
@@ -374,6 +386,15 @@ impl ChatService {
             pending_attachments: Arc::new(RwLock::new(HashMap::new())),
             events_tx,
             epoch: AtomicU64::new(0),
+        }
+    }
+
+    fn my_hello(&self) -> ChatWire {
+        ChatWire::Hello {
+            device_id: self.device_id.clone(),
+            device_name: self.device_name.clone(),
+            protocol: crate::types::PROTOCOL_VERSION,
+            transfer_port: self.transfer_port,
         }
     }
 
@@ -476,21 +497,65 @@ impl ChatService {
         let ChatWire::Hello {
             device_id: peer_id,
             device_name: peer_name,
+            protocol,
+            ..
         } = hello
         else {
             return Err("Expected hello".to_string());
         };
+        if protocol != crate::types::PROTOCOL_VERSION {
+            return Err(format!(
+                "Rejected chat from {}: incompatible protocol {}",
+                peer_name, protocol
+            ));
+        }
 
-        let reply = ChatWire::Hello {
-            device_id: self.device_id.clone(),
-            device_name: self.device_name.clone(),
-        };
         secure
-            .send_frame(&serde_json::to_vec(&reply).map_err(|e| e.to_string())?)
+            .send_frame(&serde_json::to_vec(&self.my_hello()).map_err(|e| e.to_string())?)
             .await?;
 
         self.register_channel(peer_id, peer_name, secure).await;
         Ok(())
+    }
+
+    /// Dial a peer's chat port, exchange hellos, and register the channel.
+    /// Returns (peer_id, peer_name, peer_transfer_port, sender).
+    async fn connect_to(
+        self: &Arc<Self>,
+        host: &str,
+        port: u16,
+    ) -> Result<(String, String, u16, mpsc::Sender<ChatWire>), String> {
+        let stream = TcpStream::connect((host, port))
+            .await
+            .map_err(|e| format!("Chat connection failed: {}", e))?;
+        let mut secure = SecureStream::connect(stream).await?;
+
+        secure
+            .send_frame(&serde_json::to_vec(&self.my_hello()).map_err(|e| e.to_string())?)
+            .await?;
+        let frame = timeout(HELLO_TIMEOUT, secure.recv_frame())
+            .await
+            .map_err(|_| "Hello timeout".to_string())??;
+        let ChatWire::Hello {
+            device_id: peer_id,
+            device_name: peer_name,
+            protocol,
+            transfer_port,
+        } = serde_json::from_slice(&frame).map_err(|e| format!("Bad hello: {}", e))?
+        else {
+            return Err("Expected hello".to_string());
+        };
+        if protocol != crate::types::PROTOCOL_VERSION {
+            return Err(
+                "This device runs an incompatible Bliink version — update both devices"
+                    .to_string(),
+            );
+        }
+
+        let tx = self
+            .register_channel(peer_id.clone(), peer_name.clone(), secure)
+            .await;
+        Ok((peer_id, peer_name, transfer_port, tx))
     }
 
     /// Get the channel to a peer, connecting if needed.
@@ -511,30 +576,30 @@ impl ChatService {
             return Err("This device is running an older Bliink without chat".to_string());
         }
 
-        let stream = TcpStream::connect((device.ip.as_str(), device.chat_port))
-            .await
-            .map_err(|e| format!("Chat connection failed: {}", e))?;
-        let mut secure = SecureStream::connect(stream).await?;
+        let (_, _, _, tx) = self.connect_to(&device.ip, device.chat_port).await?;
+        Ok(tx)
+    }
 
-        let hello = ChatWire::Hello {
-            device_id: self.device_id.clone(),
-            device_name: self.device_name.clone(),
-        };
-        secure
-            .send_frame(&serde_json::to_vec(&hello).map_err(|e| e.to_string())?)
-            .await?;
-        let frame = timeout(HELLO_TIMEOUT, secure.recv_frame())
-            .await
-            .map_err(|_| "Hello timeout".to_string())??;
-        let ChatWire::Hello {
-            device_id: peer_id,
-            device_name: peer_name,
-        } = serde_json::from_slice(&frame).map_err(|e| format!("Bad hello: {}", e))?
-        else {
-            return Err("Expected hello".to_string());
-        };
-
-        Ok(self.register_channel(peer_id, peer_name, secure).await)
+    /// Probe an address (manual / remote device): connect, exchange hellos,
+    /// keep the channel, and return a Device entry for the discovery list.
+    pub async fn probe_remote(self: &Arc<Self>, host: &str, port: u16) -> Result<Device, String> {
+        let (peer_id, peer_name, peer_transfer_port, _) = self.connect_to(host, port).await?;
+        if peer_id == self.device_id {
+            return Err("That address is this device".to_string());
+        }
+        Ok(Device {
+            id: peer_id,
+            name: peer_name,
+            ip: host.to_string(),
+            port: peer_transfer_port,
+            chat_port: port,
+            device_type: DeviceType::Unknown,
+            status: DeviceStatus::Online,
+            os: None,
+            last_seen: chrono::Utc::now().timestamp_millis(),
+            manual: true,
+            compatible: true,
+        })
     }
 
     async fn register_channel(

@@ -9,6 +9,9 @@ import {
   Layers,
   Monitor,
   Cpu,
+  Globe,
+  Copy,
+  Check,
 } from "lucide-react";
 import { useAppStore, type AppSettings } from "@/app/lib/store";
 import { cn } from "@/app/lib/utils";
@@ -17,6 +20,9 @@ import * as api from "@/app/lib/tauri-api";
 export default function SettingsPage() {
   const { settings, updateSettings } = useAppStore();
   const [deviceInfo, setDeviceInfo] = useState<{ os: string; arch: string } | null>(null);
+  const [networkInfo, setNetworkInfo] = useState<api.NetworkInfo | null>(null);
+  const [appVersion, setAppVersion] = useState<string>("");
+  const [copied, setCopied] = useState(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -26,9 +32,23 @@ export default function SettingsPage() {
 
       const info = await api.getDeviceInfo();
       setDeviceInfo(info);
+
+      setNetworkInfo(await api.getNetworkInfo());
+      setAppVersion(await api.getAppVersion());
     };
     load();
   }, [updateSettings]);
+
+  const handleCopyAddress = useCallback(async () => {
+    if (!networkInfo) return;
+    try {
+      await navigator.clipboard.writeText(`${networkInfo.ip}:${networkInfo.chatPort}`);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error("Clipboard error:", e);
+    }
+  }, [networkInfo]);
 
   const persistSettings = useCallback((merged: AppSettings) => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -225,6 +245,43 @@ export default function SettingsPage() {
             </div>
         </div>
 
+        {/* Remote Access */}
+        <section className="animate-fade-in space-y-3" style={{ animationDelay: "175ms" }}>
+          <h2 className="flex items-center gap-2 text-xs font-semibold text-muted uppercase tracking-wider">
+            <Globe className="w-3.5 h-3.5" />
+            Remote Access
+          </h2>
+          <div className="p-4 rounded-xl bg-surface border border-border">
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-foreground">Your address</p>
+                <p className="text-xs text-muted mt-0.5">
+                  Another device can add you from its Devices page using this address
+                </p>
+              </div>
+              <button
+                onClick={handleCopyAddress}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface-active border border-border text-[13px] font-mono text-foreground hover:border-accent/40 transition-colors shrink-0"
+                title="Copy address"
+              >
+                {networkInfo ? `${networkInfo.ip}:${networkInfo.chatPort}` : "…"}
+                {copied ? (
+                  <Check className="w-3.5 h-3.5 text-success" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5 text-muted" />
+                )}
+              </button>
+            </div>
+            <p className="text-[11px] text-muted mt-3 pt-3 border-t border-border">
+              Works across the internet through a VPN like{" "}
+              <span className="text-accent font-semibold">Tailscale</span> — install it on
+              both machines and use the Tailscale IP here. Direct internet use requires
+              port forwarding; enabling <span className="font-semibold">Require Code Check</span>{" "}
+              is strongly recommended.
+            </p>
+          </div>
+        </section>
+
         {/* About */}
         <section className="animate-fade-in pt-4 border-t border-border" style={{ animationDelay: "200ms" }}>
           <div className="flex items-center justify-between">
@@ -234,7 +291,9 @@ export default function SettingsPage() {
                 </div>
                 <div>
                   <p className="text-sm font-bold text-foreground">Bliink</p>
-                  <p className="text-[11px] text-muted">v0.1.0 • Tauri v2 + Next.js</p>
+                  <p className="text-[11px] text-muted">
+                    {appVersion ? `v${appVersion}` : "dev"} • Tauri v2 + Next.js
+                  </p>
                 </div>
              </div>
              <button className="text-[12px] font-medium text-muted hover:text-foreground transition-colors">

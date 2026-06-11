@@ -9,10 +9,13 @@
 No cloud. No accounts. No size limits. Devices find each other automatically and transfer files directly — encrypted end to end.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-38bdf8.svg)](LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/tedydonel/Bliink?color=38bdf8)](https://github.com/tedydonel/Bliink/releases/latest)
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2.0-FFC131?logo=tauri&logoColor=white)](https://tauri.app)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org)
 [![Rust](https://img.shields.io/badge/Rust-backend-orange?logo=rust)](https://www.rust-lang.org)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#-contributing)
+
+**[⬇ Download the latest release](https://github.com/tedydonel/Bliink/releases/latest)** — Windows installer, macOS dmg, Linux AppImage/deb/rpm
 
 <!-- 📷 HERO SCREENSHOT — replace this comment with your main app screenshot, e.g.:
 <img src="docs/screenshots/hero.png" width="800" alt="Bliink devices page" />
@@ -37,6 +40,9 @@ No cloud. No accounts. No size limits. Devices find each other automatically and
 | ⏯️ **Full transfer control** | Pause, resume and cancel from either side |
 | 🕓 **Transfer history** | Searchable, filterable history stored locally in SQLite |
 | 🔔 **Native notifications** | Toasts for incoming requests and finished transfers |
+| 💬 **Built-in chat** | WhatsApp-style messaging with attachments, voice notes, replies, read receipts and typing indicators — all over the same encryption |
+| 📞 **Audio calls** | Call any device on your network — WebRTC, no servers involved |
+| 🌍 **Remote devices** | Add devices by address — works across the internet through a VPN like Tailscale |
 
 ## 📸 Screenshots
 
@@ -55,7 +61,15 @@ No cloud. No accounts. No size limits. Devices find each other automatically and
 
 ## 🚀 Getting Started
 
-### Prerequisites
+### Install
+
+Grab an installer from the **[releases page](https://github.com/tedydonel/Bliink/releases/latest)**. Windows is the primary platform; macOS and Linux builds are experimental (macOS builds are unsigned — right-click → *Open* the first time).
+
+### Connect over the internet
+
+Bliink discovers devices on your LAN automatically. For devices elsewhere, install a mesh VPN like [Tailscale](https://tailscale.com) on both machines, then use **Devices → Add Device** with the other machine's Tailscale IP and the port it shows under **Settings → Remote Access**. Everything — transfers, chat, calls — works over it.
+
+### Prerequisites (building from source)
 
 - [Rust](https://rustup.rs) (stable)
 - [Node.js](https://nodejs.org) 20+ and [pnpm](https://pnpm.io)
@@ -123,8 +137,9 @@ The wire protocol is versioned by release — both devices should run the same v
 - [x] File previews (sender *and* receiver, before accepting)
 - [x] Collapsible batch groups
 - [x] Transfer history (SQLite) & desktop notifications
-- [ ] 💬 Built-in chat between devices (text, attachments, voice notes)
-- [ ] 📞 Audio calls over the LAN
+- [x] 💬 Built-in chat (text, attachments, voice notes, receipts, typing)
+- [x] 📞 Audio calls over the LAN
+- [x] 🌍 Remote devices by address (VPN / port-forward friendly)
 - [ ] 🌐 Web access — share with devices that don't have the app, from your browser
 - [ ] 🔗 PIN-bound device pairing
 - [ ] 📡 mDNS discovery

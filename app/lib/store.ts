@@ -14,6 +14,10 @@ export interface Device {
   status: DeviceStatus;
   os?: string;
   lastSeen: number;
+  // Added by address rather than discovered
+  manual?: boolean;
+  // False when the peer runs an incompatible protocol version
+  compatible?: boolean;
 }
 
 // ─── Transfer Types ─────────────────────────────────────────────

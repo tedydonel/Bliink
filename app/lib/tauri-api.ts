@@ -66,6 +66,36 @@ export async function getDevices(): Promise<Device[]> {
   return (await invoke!("get_devices")) as Device[];
 }
 
+export async function addManualDevice(
+  host: string,
+  port: number
+): Promise<Device> {
+  if (!(await ensureTauri())) throw new Error("Not available in browser");
+  return (await invoke!("add_manual_device", { host, port })) as Device;
+}
+
+export async function removeManualDevice(deviceId: string): Promise<void> {
+  if (!(await ensureTauri())) return;
+  await invoke!("remove_manual_device", { deviceId });
+}
+
+export interface NetworkInfo {
+  ip: string;
+  chatPort: number;
+  transferPort: number;
+}
+
+export async function getNetworkInfo(): Promise<NetworkInfo | null> {
+  if (!(await ensureTauri())) return null;
+  return (await invoke!("get_network_info")) as NetworkInfo;
+}
+
+export async function getAppVersion(): Promise<string> {
+  if (!(await ensureTauri())) return "dev";
+  const { getVersion } = await import("@tauri-apps/api/app");
+  return getVersion();
+}
+
 export async function onDevicesUpdated(
   handler: (devices: Device[]) => void
 ): Promise<() => void> {

@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+/// Bumped whenever the wire protocol changes incompatibly. Devices with a
+/// different protocol see a clear "update Bliink" message instead of
+/// cryptic failures.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceType {
@@ -33,6 +42,12 @@ pub struct Device {
     pub status: DeviceStatus,
     pub os: Option<String>,
     pub last_seen: i64,
+    /// Added by address rather than discovered — survives pruning.
+    #[serde(default)]
+    pub manual: bool,
+    /// False when the peer runs a different protocol version.
+    #[serde(default = "default_true")]
+    pub compatible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -147,6 +162,13 @@ pub struct HistoryEntry {
     pub batch_name: Option<String>,
 }
 
+fn default_transfer_port() -> u16 {
+    9100
+}
+fn default_chat_port() -> u16 {
+    9101
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -157,6 +179,12 @@ pub struct AppSettings {
     pub max_concurrent_transfers: u32,
     pub chunk_size: u64,
     pub device_name: String,
+    /// Fixed listener ports so remote peers can dial in (0 = random).
+    /// Applied on next launch.
+    #[serde(default = "default_transfer_port")]
+    pub transfer_port: u16,
+    #[serde(default = "default_chat_port")]
+    pub chat_port: u16,
 }
 
 impl Default for AppSettings {
@@ -172,8 +200,24 @@ impl Default for AppSettings {
                 .ok()
                 .and_then(|h| h.into_string().ok())
                 .unwrap_or_else(|| "My PC".to_string()),
+            transfer_port: default_transfer_port(),
+            chat_port: default_chat_port(),
         }
     }
+}
+
+/// A peer added by address (VPN/port-forward scenarios) rather than
+/// discovered via broadcast. Persisted in settings.json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualDevice {
+    pub host: String,
+    /// The peer's chat port — its transfer port is learned via the hello.
+    pub port: u16,
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Settings and device identity persisted to settings.json in the app data dir.
@@ -182,6 +226,8 @@ impl Default for AppSettings {
 pub struct PersistedConfig {
     pub device_id: String,
     pub settings: AppSettings,
+    #[serde(default)]
+    pub manual_devices: Vec<ManualDevice>,
 }
 
 // ─── Chat ───────────────────────────────────────────────────────

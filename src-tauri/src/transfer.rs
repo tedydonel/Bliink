@@ -25,6 +25,7 @@ const EMBED_THUMB_QUALITY: u8 = 55;
 // Protocol response bytes (sent inside encrypted frames)
 const RESP_DECLINE: u8 = 0;
 const RESP_ACCEPT: u8 = 1;
+const RESP_INCOMPATIBLE: u8 = 2;
 
 /// How long the receiving user gets to accept an incoming file.
 const ACCEPT_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -72,6 +73,9 @@ struct TransferHeader {
     /// consent prompt and lands in the chat media dir.
     #[serde(default)]
     pub chat_message_id: Option<String>,
+    /// Absent (0) on builds older than protocol versioning.
+    #[serde(default)]
+    pub protocol: u32,
 }
 
 /// Batch metadata shared by every file in a multi-file send.
@@ -319,6 +323,7 @@ impl TransferEngine {
             batch_total_bytes: job.batch.as_ref().map(|b| b.total_bytes),
             thumbnail: thumbnail.clone(),
             chat_message_id: job.chat_message_id.clone(),
+            protocol: crate::types::PROTOCOL_VERSION,
         };
 
         let transfer = TransferItem {
@@ -771,6 +776,12 @@ async fn send_file_impl(
         .await
         .map_err(|_| "Timed out waiting for the receiver to accept".to_string())??;
 
+    if response.first() == Some(&RESP_INCOMPATIBLE) {
+        return Err(
+            "The receiving device runs an incompatible Bliink version — update both devices"
+                .to_string(),
+        );
+    }
     if response.first() != Some(&RESP_ACCEPT) {
         info!("Transfer {} declined by receiver", transfer_id);
         set_status(
@@ -913,6 +924,14 @@ async fn handle_incoming(stream: TcpStream, ctx: ReceiverCtx) -> Result<(), Stri
     }
     let header: TransferHeader =
         serde_json::from_slice(&header_buf).map_err(|e| format!("Deserialize error: {}", e))?;
+
+    if header.protocol != crate::types::PROTOCOL_VERSION {
+        let _ = secure.send_frame(&[RESP_INCOMPATIBLE]).await;
+        return Err(format!(
+            "Rejected transfer from {}: incompatible protocol version {}",
+            header.sender_name, header.protocol
+        ));
+    }
 
     info!(
         "Incoming file offer: {} ({} bytes) from {}",

@@ -3,9 +3,10 @@ use crate::discovery::DiscoveryService;
 use crate::history::HistoryStore;
 use crate::transfer::TransferEngine;
 use crate::types::{
-    AppSettings, ChatMessage, Conversation, Device, HistoryEntry, PersistedConfig, TransferItem,
+    AppSettings, ChatMessage, Conversation, Device, DeviceStatus, DeviceType, HistoryEntry,
+    ManualDevice, PersistedConfig, TransferItem,
 };
-use log::info;
+use log::{info, warn};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
@@ -17,9 +18,64 @@ pub struct AppState {
     pub chat: Arc<ChatService>,
     pub history: Option<Arc<HistoryStore>>,
     pub settings: Arc<Mutex<AppSettings>>,
+    pub manual_devices: Arc<Mutex<Vec<ManualDevice>>>,
     pub device_id: String,
     pub config_path: PathBuf,
     pub thumb_cache_dir: PathBuf,
+    pub transfer_port: u16,
+    pub chat_port: u16,
+}
+
+impl AppState {
+    async fn persist_config(&self) -> Result<(), String> {
+        let cfg = PersistedConfig {
+            device_id: self.device_id.clone(),
+            settings: self.settings.lock().await.clone(),
+            manual_devices: self.manual_devices.lock().await.clone(),
+        };
+        crate::config::save(&self.config_path, &cfg)
+    }
+}
+
+/// Offline placeholder for a persisted manual device that didn't answer.
+pub fn offline_manual_device(m: &ManualDevice) -> Option<Device> {
+    let id = m.device_id.clone()?;
+    Some(Device {
+        id,
+        name: m.name.clone().unwrap_or_else(|| m.host.clone()),
+        ip: m.host.clone(),
+        port: 0,
+        chat_port: m.port,
+        device_type: DeviceType::Unknown,
+        status: DeviceStatus::Offline,
+        os: None,
+        last_seen: 0,
+        manual: true,
+        compatible: true,
+    })
+}
+
+/// Try to reach every saved manual device and refresh its entry.
+pub fn spawn_manual_probes(
+    chat: Arc<ChatService>,
+    discovery: Arc<Mutex<DiscoveryService>>,
+    devices: Vec<ManualDevice>,
+) {
+    tokio::spawn(async move {
+        for m in devices {
+            match chat.probe_remote(&m.host, m.port).await {
+                Ok(device) => {
+                    discovery.lock().await.upsert_manual(device);
+                }
+                Err(e) => {
+                    warn!("Manual device {}:{} unreachable: {}", m.host, m.port, e);
+                    if let Some(device) = offline_manual_device(&m) {
+                        discovery.lock().await.upsert_manual(device);
+                    }
+                }
+            }
+        }
+    });
 }
 
 impl AppState {
@@ -35,18 +91,96 @@ pub async fn start_discovery(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let mut discovery = state.discovery.lock().await;
-    let mut rx = discovery.start_browsing()?;
+    {
+        let mut discovery = state.discovery.lock().await;
+        let mut rx = discovery.start_browsing()?;
 
-    let app_handle = app.clone();
-    tokio::spawn(async move {
-        while let Ok(devices) = rx.recv().await {
-            let _ = app_handle.emit("devices-updated", &devices);
-        }
-    });
+        let app_handle = app.clone();
+        tokio::spawn(async move {
+            while let Ok(devices) = rx.recv().await {
+                let _ = app_handle.emit("devices-updated", &devices);
+            }
+        });
+    }
+
+    // Re-probe saved remote devices alongside the broadcast scan
+    let manual = state.manual_devices.lock().await.clone();
+    if !manual.is_empty() {
+        spawn_manual_probes(state.chat.clone(), state.discovery.clone(), manual);
+    }
 
     info!("Discovery started");
     Ok(())
+}
+
+// ─── Remote (manual) Devices ────────────────────────────────────
+
+#[tauri::command]
+pub async fn add_manual_device(
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+) -> Result<Device, String> {
+    let host = host.trim().to_string();
+    if host.is_empty() {
+        return Err("Enter a host or IP address".to_string());
+    }
+
+    let device = state.chat.probe_remote(&host, port).await?;
+    state.discovery.lock().await.upsert_manual(device.clone());
+
+    {
+        let mut list = state.manual_devices.lock().await;
+        list.retain(|m| {
+            !(m.host == host && m.port == port)
+                && m.device_id.as_deref() != Some(device.id.as_str())
+        });
+        list.push(ManualDevice {
+            host,
+            port,
+            device_id: Some(device.id.clone()),
+            name: Some(device.name.clone()),
+        });
+    }
+    state.persist_config().await?;
+
+    info!("Added remote device {} ({})", device.name, device.ip);
+    Ok(device)
+}
+
+#[tauri::command]
+pub async fn remove_manual_device(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<(), String> {
+    state.discovery.lock().await.remove_device(&device_id);
+    {
+        let mut list = state.manual_devices.lock().await;
+        list.retain(|m| m.device_id.as_deref() != Some(device_id.as_str()));
+    }
+    state.persist_config().await?;
+    Ok(())
+}
+
+/// This device's reachable address info, shown in Settings for sharing
+/// with remote peers.
+#[tauri::command]
+pub async fn get_network_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    // UDP "connect" doesn't send packets — it just resolves the local
+    // address the OS would route through.
+    let ip = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("8.8.8.8:80")?;
+            s.local_addr()
+        })
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    Ok(serde_json::json!({
+        "ip": ip,
+        "chatPort": state.chat_port,
+        "transferPort": state.transfer_port,
+    }))
 }
 
 #[tauri::command]
@@ -341,6 +475,7 @@ pub async fn update_settings(
     let cfg = PersistedConfig {
         device_id: state.device_id.clone(),
         settings: settings.clone(),
+        manual_devices: state.manual_devices.lock().await.clone(),
     };
     crate::config::save(&state.config_path, &cfg)?;
 

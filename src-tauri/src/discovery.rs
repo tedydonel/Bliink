@@ -20,6 +20,9 @@ struct DiscoveryMessage {
     chat_port: u16,
     device_type: String,
     os: String,
+    /// Absent (0) on builds older than protocol versioning.
+    #[serde(default)]
+    protocol: u32,
 }
 
 pub struct DiscoveryService {
@@ -53,6 +56,15 @@ impl DiscoveryService {
     /// Snapshot of a single discovered device.
     pub fn get_device(&self, id: &str) -> Option<Device> {
         self.devices.lock().unwrap().get(id).cloned()
+    }
+
+    /// Insert or update a manually-added device (survives pruning).
+    pub fn upsert_manual(&self, device: Device) {
+        self.devices.lock().unwrap().insert(device.id.clone(), device);
+    }
+
+    pub fn remove_device(&self, id: &str) {
+        self.devices.lock().unwrap().remove(id);
     }
 
     #[allow(dead_code)]
@@ -102,6 +114,7 @@ impl DiscoveryService {
                 chat_port: my_chat_port,
                 device_type: device_type_str,
                 os: os_name,
+                protocol: crate::types::PROTOCOL_VERSION,
             };
 
             let msg_bytes = match serde_json::to_vec(&msg) {
@@ -171,15 +184,28 @@ impl DiscoveryService {
                                             status: DeviceStatus::Online,
                                             os: Some(received_msg.os),
                                             last_seen: chrono::Utc::now().timestamp_millis(),
+                                            manual: false,
+                                            compatible: received_msg.protocol
+                                                == crate::types::PROTOCOL_VERSION,
                                         };
 
                                         {
                                             let mut devs = devices.lock().unwrap();
+                                            // Keep the manual flag if this peer was also
+                                            // added by address
+                                            let manual = devs
+                                                .get(&received_msg.id)
+                                                .map(|d| d.manual)
+                                                .unwrap_or(false);
+                                            let mut device = device;
+                                            device.manual = manual;
                                             devs.insert(received_msg.id, device);
 
-                                            // Prune stale devices
+                                            // Prune stale devices (manual ones stay)
                                             let now = chrono::Utc::now().timestamp_millis();
-                                            devs.retain(|_, d| now - d.last_seen < OFFLINE_THRESHOLD);
+                                            devs.retain(|_, d| {
+                                                d.manual || now - d.last_seen < OFFLINE_THRESHOLD
+                                            });
                                         }
 
                                         let devs_list: Vec<Device> =

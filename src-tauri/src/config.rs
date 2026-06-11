@@ -15,6 +15,7 @@ pub fn load_or_create(path: &Path) -> PersistedConfig {
     let cfg = PersistedConfig {
         device_id: uuid::Uuid::new_v4().to_string(),
         settings: AppSettings::default(),
+        manual_devices: Vec::new(),
     };
     if let Err(e) = save(path, &cfg) {
         error!("Failed to write settings file: {}", e);
