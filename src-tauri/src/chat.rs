@@ -347,6 +347,11 @@ struct Channel {
     epoch: u64,
 }
 
+/// True for virtual peers connected through the web access server.
+fn is_web_peer(device_id: &str) -> bool {
+    device_id.starts_with("web-")
+}
+
 pub struct ChatService {
     device_id: String,
     device_name: String,
@@ -356,6 +361,7 @@ pub struct ChatService {
     discovery: Arc<Mutex<DiscoveryService>>,
     transfer: Arc<TransferEngine>,
     media_dir: PathBuf,
+    web: Arc<crate::web::WebBroker>,
     channels: Arc<RwLock<HashMap<String, Channel>>>,
     /// transfer_id → (message_id, inbound)
     pending_attachments: Arc<RwLock<HashMap<String, (String, bool)>>>,
@@ -364,6 +370,7 @@ pub struct ChatService {
 }
 
 impl ChatService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device_id: String,
         device_name: String,
@@ -372,6 +379,7 @@ impl ChatService {
         discovery: Arc<Mutex<DiscoveryService>>,
         transfer: Arc<TransferEngine>,
         media_dir: PathBuf,
+        web: Arc<crate::web::WebBroker>,
     ) -> Self {
         let (events_tx, _) = broadcast::channel(256);
         Self {
@@ -382,11 +390,20 @@ impl ChatService {
             discovery,
             transfer,
             media_dir,
+            web,
             channels: Arc::new(RwLock::new(HashMap::new())),
             pending_attachments: Arc::new(RwLock::new(HashMap::new())),
             events_tx,
             epoch: AtomicU64::new(0),
         }
+    }
+
+    pub fn host_name(&self) -> &str {
+        &self.device_name
+    }
+
+    pub fn media_dir(&self) -> &PathBuf {
+        &self.media_dir
     }
 
     fn my_hello(&self) -> ChatWire {
@@ -835,6 +852,43 @@ impl ChatService {
             .unwrap_or_else(|| "file".to_string());
         let kind = kind_hint.unwrap_or_else(|| infer_kind(&name));
 
+        // Web peers skip the transfer engine — the browser downloads the
+        // file over HTTP from the web server instead.
+        if is_web_peer(device_id) {
+            let mut msg = ChatMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                conversation_id: device_id.to_string(),
+                direction: "out".to_string(),
+                text: None,
+                attachment_kind: Some(kind),
+                attachment_name: Some(name),
+                attachment_path: Some(file_path.to_string()),
+                attachment_size: Some(meta.len()),
+                attachment_transfer_id: None,
+                reply_to,
+                status: "sending".to_string(),
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            self.store.insert_message(&msg).await?;
+            let peer_name = self.peer_name(device_id).await;
+            let _ = self
+                .store
+                .bump_conversation(device_id, &peer_name, &preview(&msg), msg.created_at, false)
+                .await;
+            self.emit(ChatEvent::ConversationsChanged);
+
+            msg.status = match self.deliver(device_id, &msg).await {
+                Ok(_) => "sent".to_string(),
+                Err(e) => {
+                    warn!("Failed to send attachment to web client: {}", e);
+                    "failed".to_string()
+                }
+            };
+            let _ = self.store.set_status(&msg.id, &msg.status).await;
+            self.emit(ChatEvent::Message(msg.clone()));
+            return Ok(msg);
+        }
+
         let device = {
             let discovery = self.discovery.lock().await;
             discovery.get_device(device_id)
@@ -917,6 +971,13 @@ impl ChatService {
     }
 
     async fn deliver(self: &Arc<Self>, device_id: &str, msg: &ChatMessage) -> Result<(), String> {
+        if is_web_peer(device_id) {
+            let push = serde_json::json!({"type": "message", "message": msg}).to_string();
+            if self.web.push(device_id, push).await {
+                return Ok(());
+            }
+            return Err("Browser client is not connected".to_string());
+        }
         let tx = self.ensure_channel(device_id).await?;
         tx.send(ChatWire::Message {
             id: msg.id.clone(),
@@ -936,8 +997,11 @@ impl ChatService {
         let ids = self.store.unread_inbound_ids(device_id).await;
         self.store.mark_inbound_read(device_id).await?;
         if !ids.is_empty() {
-            // Read receipts only ride an existing channel — don't dial out
-            if let Some(ch) = self.channels.read().await.get(device_id) {
+            if is_web_peer(device_id) {
+                let push = serde_json::json!({"type": "read", "ids": ids}).to_string();
+                let _ = self.web.push(device_id, push).await;
+            } else if let Some(ch) = self.channels.read().await.get(device_id) {
+                // Read receipts only ride an existing channel — don't dial out
                 let _ = ch.tx.send(ChatWire::Read { ids }).await;
             }
         }
@@ -946,6 +1010,11 @@ impl ChatService {
     }
 
     pub async fn set_typing(&self, device_id: &str, typing: bool) {
+        if is_web_peer(device_id) {
+            let push = serde_json::json!({"type": "typing", "typing": typing}).to_string();
+            let _ = self.web.push(device_id, push).await;
+            return;
+        }
         if let Some(ch) = self.channels.read().await.get(device_id) {
             let _ = ch.tx.send(ChatWire::Typing { typing }).await;
         }
@@ -966,15 +1035,164 @@ impl ChatService {
     pub async fn get_conversations(&self) -> Result<Vec<Conversation>, String> {
         let mut conversations = self.store.get_conversations().await?;
         let online_channels: Vec<String> = self.channels.read().await.keys().cloned().collect();
+        let web_online = self.web.online_ids().await;
         let discovered: Vec<String> = {
             let discovery = self.discovery.lock().await;
             discovery.get_devices().into_iter().map(|d| d.id).collect()
         };
         for conv in &mut conversations {
             conv.online = online_channels.contains(&conv.device_id)
-                || discovered.contains(&conv.device_id);
+                || discovered.contains(&conv.device_id)
+                || web_online.contains(&conv.device_id);
         }
         Ok(conversations)
+    }
+
+    // ── Web access (browser clients as virtual peers) ──
+
+    async fn web_peer_name(&self, session_id: &str) -> String {
+        if let Some(name) = self.web.session_name(session_id).await {
+            return format!("{} (web)", name);
+        }
+        self.peer_name(session_id).await
+    }
+
+    /// A browser session authenticated — surface it as a conversation.
+    pub async fn web_session_started(&self, session_id: &str, name: &str) {
+        let _ = self
+            .store
+            .bump_conversation(
+                session_id,
+                &format!("{} (web)", name),
+                "Connected via web",
+                chrono::Utc::now().timestamp_millis(),
+                false,
+            )
+            .await;
+        self.emit(ChatEvent::ConversationsChanged);
+    }
+
+    /// A browser connected or disconnected — refresh presence.
+    pub async fn web_presence_changed(&self) {
+        self.emit(ChatEvent::ConversationsChanged);
+    }
+
+    /// Text message from a browser client.
+    pub async fn web_message_in(
+        &self,
+        session_id: &str,
+        text: String,
+        reply_to: Option<String>,
+    ) -> Result<ChatMessage, String> {
+        let text: String = text.chars().take(MAX_TEXT_LEN).collect();
+        if text.trim().is_empty() {
+            return Err("Message is empty".to_string());
+        }
+        let peer_name = self.web_peer_name(session_id).await;
+        let msg = ChatMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            conversation_id: session_id.to_string(),
+            direction: "in".to_string(),
+            text: Some(text),
+            attachment_kind: None,
+            attachment_name: None,
+            attachment_path: None,
+            attachment_size: None,
+            attachment_transfer_id: None,
+            reply_to,
+            status: "unread".to_string(),
+            created_at: chrono::Utc::now().timestamp_millis(),
+        };
+        self.store.insert_message(&msg).await?;
+        let _ = self
+            .store
+            .bump_conversation(session_id, &peer_name, &preview(&msg), msg.created_at, true)
+            .await;
+        self.emit(ChatEvent::Incoming {
+            message: msg.clone(),
+            peer_name,
+        });
+        self.emit(ChatEvent::ConversationsChanged);
+        Ok(msg)
+    }
+
+    /// File uploaded by a browser client (already saved to the media dir).
+    pub async fn web_attachment_in(
+        &self,
+        session_id: &str,
+        path: &Path,
+        size: u64,
+    ) -> Result<ChatMessage, String> {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".to_string());
+        let kind = infer_kind(&name);
+        let peer_name = self.web_peer_name(session_id).await;
+        let msg = ChatMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            conversation_id: session_id.to_string(),
+            direction: "in".to_string(),
+            text: None,
+            attachment_kind: Some(kind),
+            attachment_name: Some(name),
+            attachment_path: Some(path.to_string_lossy().into_owned()),
+            attachment_size: Some(size),
+            attachment_transfer_id: None,
+            reply_to: None,
+            status: "unread".to_string(),
+            created_at: chrono::Utc::now().timestamp_millis(),
+        };
+        self.store.insert_message(&msg).await?;
+        let _ = self
+            .store
+            .bump_conversation(session_id, &peer_name, &preview(&msg), msg.created_at, true)
+            .await;
+        self.emit(ChatEvent::Incoming {
+            message: msg.clone(),
+            peer_name,
+        });
+        self.emit(ChatEvent::ConversationsChanged);
+        Ok(msg)
+    }
+
+    /// Browser client read the host's messages.
+    pub async fn web_read_receipts(&self, session_id: &str, ids: Vec<String>) {
+        for id in ids {
+            // Only touch messages that belong to this session's conversation
+            let Ok(Some(msg)) = self.store.get_message(&id).await else {
+                continue;
+            };
+            if msg.conversation_id != session_id {
+                continue;
+            }
+            if let Ok(Some(updated)) = self.store.upgrade_status(&id, "read").await {
+                self.emit(ChatEvent::Message(updated));
+            }
+        }
+    }
+
+    pub async fn web_typing(&self, session_id: &str, typing: bool) {
+        self.emit(ChatEvent::Typing(TypingEvent {
+            device_id: session_id.to_string(),
+            typing,
+        }));
+    }
+
+    /// Resolve a downloadable attachment for a session: (path, name, kind).
+    pub async fn web_attachment_file(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Option<(PathBuf, String, String)> {
+        let msg = self.store.get_message(message_id).await.ok().flatten()?;
+        if msg.conversation_id != session_id {
+            return None;
+        }
+        let path = PathBuf::from(msg.attachment_path?);
+        let name = msg.attachment_name.unwrap_or_else(|| "file".to_string());
+        let kind = msg.attachment_kind.unwrap_or_else(|| "file".to_string());
+        Some((path, name, kind))
     }
 
     pub async fn get_messages(

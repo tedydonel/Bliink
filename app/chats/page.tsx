@@ -227,6 +227,7 @@ export default function ChatsPage() {
                 )}
               </p>
             </div>
+            {!activeId.startsWith("web-") && (
             <button
               onClick={() => callManager.startCall(activeId, activeName)}
               disabled={!activeOnline || callState.status !== "idle"}
@@ -247,6 +248,7 @@ export default function ChatsPage() {
             >
               <Phone className="w-4 h-4" />
             </button>
+            )}
           </div>
 
           {/* Messages */}

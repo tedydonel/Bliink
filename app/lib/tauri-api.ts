@@ -421,6 +421,31 @@ export async function onChatConversations(
   return listen!("chat-conversations", () => handler());
 }
 
+// ─── Web Access ─────────────────────────────────────────────────
+
+export interface WebServerStatus {
+  running: boolean;
+  url: string;
+  code: string;
+  port: number;
+  clients: { name: string; online: boolean }[];
+}
+
+export async function startWebServer(): Promise<WebServerStatus | null> {
+  if (!(await ensureTauri())) return null;
+  return (await invoke!("start_web_server")) as WebServerStatus;
+}
+
+export async function stopWebServer(): Promise<WebServerStatus | null> {
+  if (!(await ensureTauri())) return null;
+  return (await invoke!("stop_web_server")) as WebServerStatus;
+}
+
+export async function getWebServerStatus(): Promise<WebServerStatus | null> {
+  if (!(await ensureTauri())) return null;
+  return (await invoke!("get_web_server_status")) as WebServerStatus;
+}
+
 // ─── Calls (signaling rides the chat channel) ───────────────────
 
 export async function sendCallSignal(

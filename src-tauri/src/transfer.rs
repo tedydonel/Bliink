@@ -1315,7 +1315,7 @@ fn sanitize_component(part: &str) -> Option<String> {
 
 /// Strip directory components and unsafe characters from a sender-supplied
 /// file name so it cannot escape the download directory.
-fn sanitize_file_name(name: &str) -> String {
+pub(crate) fn sanitize_file_name(name: &str) -> String {
     Path::new(name)
         .file_name()
         .and_then(|n| sanitize_component(&n.to_string_lossy()))
@@ -1324,7 +1324,7 @@ fn sanitize_file_name(name: &str) -> String {
 
 /// Pick a path in `dir` that doesn't overwrite an existing file, appending
 /// " (1)", " (2)", ... before the extension as needed.
-fn unique_file_path(dir: &Path, file_name: &str) -> PathBuf {
+pub(crate) fn unique_file_path(dir: &Path, file_name: &str) -> PathBuf {
     let candidate = dir.join(file_name);
     if !candidate.exists() {
         return candidate;

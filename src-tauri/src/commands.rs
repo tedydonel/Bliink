@@ -2,6 +2,7 @@ use crate::chat::ChatService;
 use crate::discovery::DiscoveryService;
 use crate::history::HistoryStore;
 use crate::transfer::TransferEngine;
+use crate::web::{WebBroker, WebServerHandle};
 use crate::types::{
     AppSettings, ChatMessage, Conversation, Device, DeviceStatus, DeviceType, HistoryEntry,
     ManualDevice, PersistedConfig, TransferItem,
@@ -24,6 +25,22 @@ pub struct AppState {
     pub thumb_cache_dir: PathBuf,
     pub transfer_port: u16,
     pub chat_port: u16,
+    pub web_broker: Arc<WebBroker>,
+    pub web_server: Arc<Mutex<Option<WebServerHandle>>>,
+}
+
+const WEB_ACCESS_PORT: u16 = 9102;
+
+/// Primary outbound IP — the UDP "connect" never sends packets, it just
+/// resolves which local address the OS would route through.
+fn local_ip() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("8.8.8.8:80")?;
+            s.local_addr()
+        })
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 impl AppState {
@@ -166,21 +183,73 @@ pub async fn remove_manual_device(
 /// with remote peers.
 #[tauri::command]
 pub async fn get_network_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    // UDP "connect" doesn't send packets — it just resolves the local
-    // address the OS would route through.
-    let ip = std::net::UdpSocket::bind("0.0.0.0:0")
-        .and_then(|s| {
-            s.connect("8.8.8.8:80")?;
-            s.local_addr()
-        })
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
-
     Ok(serde_json::json!({
-        "ip": ip,
+        "ip": local_ip(),
         "chatPort": state.chat_port,
         "transferPort": state.transfer_port,
     }))
+}
+
+// ─── Web Access ─────────────────────────────────────────────────
+
+async fn web_status(state: &AppState) -> serde_json::Value {
+    let guard = state.web_server.lock().await;
+    let running = guard.is_some();
+    let (port, code) = guard
+        .as_ref()
+        .map(|h| (h.port, h.code.clone()))
+        .unwrap_or((WEB_ACCESS_PORT, String::new()));
+    drop(guard);
+
+    let clients: Vec<serde_json::Value> = state
+        .web_broker
+        .list()
+        .await
+        .into_iter()
+        .map(|(name, online)| serde_json::json!({"name": name, "online": online}))
+        .collect();
+
+    serde_json::json!({
+        "running": running,
+        "url": format!("http://{}:{}", local_ip(), port),
+        "code": code,
+        "port": port,
+        "clients": clients,
+    })
+}
+
+#[tauri::command]
+pub async fn start_web_server(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    {
+        let mut guard = state.web_server.lock().await;
+        if guard.is_none() {
+            let handle = crate::web::start_server(
+                state.chat.clone(),
+                state.web_broker.clone(),
+                WEB_ACCESS_PORT,
+            )
+            .await?;
+            *guard = Some(handle);
+        }
+    }
+    Ok(web_status(&state).await)
+}
+
+#[tauri::command]
+pub async fn stop_web_server(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    if let Some(mut handle) = state.web_server.lock().await.take() {
+        handle.stop();
+    }
+    state.web_broker.clear().await;
+    state.chat.web_presence_changed().await;
+    Ok(web_status(&state).await)
+}
+
+#[tauri::command]
+pub async fn get_web_server_status(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    Ok(web_status(&state).await)
 }
 
 #[tauri::command]

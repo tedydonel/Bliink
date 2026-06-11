@@ -8,6 +8,7 @@ import {
   ArrowLeftRight,
   MessageCircle,
   Clock,
+  Globe,
   User,
   ChevronLeft,
   ChevronRight,
@@ -20,6 +21,7 @@ const navItems = [
   { href: "/transfer", label: "Transfer", icon: ArrowLeftRight },
   { href: "/chats", label: "Chats", icon: MessageCircle },
   { href: "/history", label: "History", icon: Clock },
+  { href: "/web", label: "Web Access", icon: Globe },
 ];
 
 export default function Sidebar() {
