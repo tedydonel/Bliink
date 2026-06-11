@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#0a0d14" />
+<title>Bliink</title>
+<style>
+  :root {
+    --bg: #0a0d14;
+    --surface: #111723;
+    --surface-2: #19212f;
+    --surface-3: #202a3b;
+    --border: #1f2937;
+    --border-bright: #2c3a4f;
+    --fg: #e8eef7;
+    --muted: #71809a;
+    --muted-2: #9aa8bf;
+    --accent: #38bdf8;
+    --accent-deep: #0284c7;
+    --accent-dim: rgba(56, 189, 248, 0.1);
+    --success: #34d399;
+    --danger: #f87171;
+    --radius: 18px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    background-image:
+      radial-gradient(ellipse 70% 45% at 50% -10%, rgba(56, 189, 248, 0.08), transparent),
+      radial-gradient(ellipse 45% 35% at 90% 110%, rgba(2, 132, 199, 0.06), transparent);
+    background-attachment: fixed;
+    color: var(--fg);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    font-size: 15px;
+    overscroll-behavior: none;
+    -webkit-font-smoothing: antialiased;
+  }
+  .hidden { display: none !important; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
+  svg { display: block; }
+
+  /* ─── Centered screens (login / notice) ─── */
+  .screen {
+    min-height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .card {
+    width: 100%;
+    max-width: 380px;
+    background: linear-gradient(180deg, var(--surface) 0%, #0e141f 100%);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    padding: 36px 30px 30px;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+    animation: rise 0.35s ease;
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: none; }
+  }
+  .brand { display: flex; flex-direction: column; align-items: center; margin-bottom: 26px; }
+  .brand-mark {
+    width: 64px; height: 64px;
+    border-radius: 20px;
+    background: linear-gradient(135deg, rgba(56,189,248,0.18), rgba(2,132,199,0.10));
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--accent);
+    box-shadow: 0 0 32px rgba(56, 189, 248, 0.18);
+    margin-bottom: 14px;
+  }
+  .brand h1 { font-size: 23px; font-weight: 800; letter-spacing: -0.4px; }
+  .brand p { font-size: 13px; color: var(--muted); margin-top: 5px; text-align: center; line-height: 1.5; }
+
+  .field { margin-bottom: 16px; }
+  .field label {
+    display: block;
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 7px;
+  }
+  .field input[type="text"] {
+    width: 100%;
+    height: 46px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    color: var(--fg);
+    font-size: 15px;
+    font-family: inherit;
+    padding: 0 14px;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .field input[type="text"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+  }
+  .field input::placeholder { color: #4a5871; }
+
+  /* segmented code input */
+  .code-wrap { position: relative; cursor: text; }
+  .code-wrap input {
+    position: absolute; inset: 0;
+    opacity: 0;
+    font-size: 16px;
+    border: none;
+    width: 100%;
+  }
+  .code-boxes { display: flex; gap: 8px; justify-content: space-between; }
+  .code-box {
+    flex: 1;
+    height: 52px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .code-box.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+  }
+  .code-box.active:empty::after {
+    content: "";
+    width: 2px; height: 22px;
+    background: var(--accent);
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .btn {
+    width: 100%;
+    height: 48px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+    color: #051321;
+    font-weight: 800;
+    font-size: 14.5px;
+    font-family: inherit;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    margin-top: 8px;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    transition: transform 0.12s, box-shadow 0.12s, opacity 0.12s;
+    box-shadow: 0 6px 22px rgba(56, 189, 248, 0.22);
+  }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 8px 26px rgba(56, 189, 248, 0.3); }
+  .btn:active { transform: none; }
+  .btn:disabled { opacity: 0.55; cursor: default; transform: none; }
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid rgba(5, 19, 33, 0.3);
+    border-top-color: #051321;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    color: var(--danger);
+    font-size: 13px;
+    margin-top: 14px;
+    min-height: 18px;
+    text-align: center;
+  }
+
+  .notice { text-align: left; font-size: 13.5px; color: var(--muted-2); line-height: 1.65; }
+  .notice b { color: var(--fg); }
+  .notice code {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    padding: 1px 7px;
+    border-radius: 6px;
+    color: var(--accent);
+    font-size: 12.5px;
+  }
+  .notice ol { margin: 10px 0 0 18px; display: flex; flex-direction: column; gap: 7px; }
+
+  /* ─── Chat ─── */
+  #chat {
+    height: 100%;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    max-width: 820px;
+    margin: 0 auto;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 13px;
+    padding: 13px 18px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(17, 23, 35, 0.85);
+    backdrop-filter: blur(12px);
+    z-index: 10;
+  }
+  .avatar {
+    width: 42px; height: 42px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, rgba(56,189,248,0.22), rgba(2,132,199,0.12));
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--accent); font-weight: 800; font-size: 16px;
+    flex-shrink: 0;
+  }
+  header .info { min-width: 0; flex: 1; }
+  header .name { font-weight: 700; font-size: 15.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header .status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: 1px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex-shrink: 0; transition: background 0.3s; }
+  .dot.on { background: var(--success); box-shadow: 0 0 8px rgba(52, 211, 153, 0.6); }
+  .secure-tag {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 11px; color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    padding: 5px 11px;
+    flex-shrink: 0;
+  }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px 16px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .day-sep { align-self: center; padding: 10px 0 4px; }
+  .day-sep span {
+    font-size: 10.5px; font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    padding: 4px 12px;
+  }
+  .msg { max-width: min(78%, 520px); display: flex; flex-direction: column; animation: pop 0.18s ease; }
+  @keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .msg.mine { align-self: flex-end; align-items: flex-end; }
+  .msg.theirs { align-self: flex-start; align-items: flex-start; }
+  .bubble {
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    font-size: 14.5px;
+    line-height: 1.5;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+  }
+  .mine .bubble {
+    background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+    color: #051321;
+    border-bottom-right-radius: 6px;
+    font-weight: 500;
+  }
+  .theirs .bubble {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 6px;
+  }
+  .meta { font-size: 10.5px; color: var(--muted); margin: 4px 4px 0; display: flex; gap: 5px; align-items: center; }
+  .ticks { font-size: 11px; letter-spacing: -1px; }
+  .ticks.read { color: var(--accent); }
+
+  .bubble.media { padding: 5px; }
+  .mine .bubble.media { background: var(--surface-2); border: 1px solid var(--border); }
+  .bubble img {
+    max-width: 100%; max-height: 340px;
+    border-radius: 14px;
+    display: block;
+  }
+  .bubble audio { width: 250px; max-width: 100%; display: block; margin: 4px; }
+  .filecard {
+    display: flex; align-items: center; gap: 12px;
+    text-decoration: none; color: var(--fg);
+    padding: 9px 12px 9px 9px;
+    border-radius: 13px;
+    transition: background 0.15s;
+  }
+  .filecard:hover { background: var(--surface-3); }
+  .ficon {
+    width: 42px; height: 42px;
+    border-radius: 11px;
+    background: var(--accent-dim);
+    color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .fmeta { min-width: 0; }
+  .fname { font-size: 13.5px; font-weight: 600; word-break: break-all; line-height: 1.35; }
+  .fsize { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  .uploading { opacity: 0.75; }
+  .progress {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin-top: 7px;
+    overflow: hidden;
+    width: 170px;
+    max-width: 100%;
+  }
+  .progress > div {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-deep));
+    width: 0%;
+    transition: width 0.2s;
+  }
+
+  #typing {
+    padding: 2px 18px 8px;
+    font-size: 12.5px;
+    color: var(--muted-2);
+    min-height: 24px;
+    display: flex; align-items: center; gap: 7px;
+  }
+  .tdots { display: inline-flex; gap: 3px; }
+  .tdots span {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: tb 1.2s ease-in-out infinite;
+  }
+  .tdots span:nth-child(2) { animation-delay: 0.15s; }
+  .tdots span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes tb { 0%, 60%, 100% { transform: none; opacity: 0.4; } 30% { transform: translateY(-4px); opacity: 1; } }
+
+  footer {
+    display: flex;
+    align-items: flex-end;
+    gap: 9px;
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: rgba(17, 23, 35, 0.85);
+    backdrop-filter: blur(12px);
+  }
+  .iconbtn {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--muted-2);
+    cursor: pointer;
+    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    transition: color 0.15s, border-color 0.15s, transform 0.12s;
+  }
+  .iconbtn:hover { color: var(--fg); border-color: var(--border-bright); }
+  #input {
+    flex: 1;
+    min-height: 44px;
+    max-height: 130px;
+    resize: none;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 14.5px;
+    padding: 11px 17px;
+    outline: none;
+    line-height: 1.45;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  #input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1); }
+  #input::placeholder { color: #4a5871; }
+  #send {
+    background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+    border: none;
+    color: #051321;
+    box-shadow: 0 4px 16px rgba(56, 189, 248, 0.25);
+  }
+  #send:hover { color: #051321; transform: translateY(-1px); }
+
+  #drop-overlay {
+    position: fixed; inset: 10px;
+    background: rgba(56, 189, 248, 0.08);
+    backdrop-filter: blur(2px);
+    border: 2px dashed var(--accent);
+    border-radius: 22px;
+    z-index: 50;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+    font-size: 17px; font-weight: 700; color: var(--accent);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+<!-- Shown when the page is opened as a file instead of through the app -->
+<div id="file-notice" class="screen hidden">
+  <div class="card">
+    <div class="brand">
+      <div class="brand-mark"><svg width="30" height="30" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 4.5 13.5h5L11 22l8.5-11.5h-5L13 2z"/></svg></div>
+      <h1>Bliink</h1>
+    </div>
+    <div class="notice">
+      <b>This page can't be opened directly</b> — it's served by the Bliink app.
+      <ol>
+        <li>In Bliink, open <b>Web Access</b> and press <b>Start Server</b></li>
+        <li>On this device, open the link Bliink shows — e.g. <code>http://192.168.1.20:9102</code></li>
+        <li>Enter the 6-digit code from the app</li>
+      </ol>
+    </div>
+  </div>
+</div>
+
+<div id="login" class="screen hidden">
+  <div class="card">
+    <div class="brand">
+      <div class="brand-mark"><svg width="30" height="30" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 4.5 13.5h5L11 22l8.5-11.5h-5L13 2z"/></svg></div>
+      <h1>Bliink</h1>
+      <p>Enter the code shown in the Bliink app<br/>to start chatting and sharing files</p>
+    </div>
+    <div class="field">
+      <label for="name">Your name</label>
+      <input id="name" type="text" placeholder="e.g. Ted's phone" maxlength="40" autocomplete="nickname" />
+    </div>
+    <div class="field">
+      <label>Access code</label>
+      <div class="code-wrap" id="code-wrap">
+        <input id="code" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" />
+        <div class="code-boxes" id="code-boxes">
+          <div class="code-box"></div><div class="code-box"></div><div class="code-box"></div>
+          <div class="code-box"></div><div class="code-box"></div><div class="code-box"></div>
+        </div>
+      </div>
+    </div>
+    <button class="btn" id="connect"><span id="connect-label">Connect</span></button>
+    <div class="error" id="login-error"></div>
+  </div>
+</div>
+
+<div id="chat" class="hidden">
+  <header>
+    <div class="avatar" id="host-avatar">B</div>
+    <div class="info">
+      <div class="name" id="host-name">Bliink</div>
+      <div class="status"><span class="dot" id="conn-dot"></span><span id="conn-text">Connecting…</span></div>
+    </div>
+    <div class="secure-tag">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      Code protected
+    </div>
+  </header>
+  <div id="messages"></div>
+  <div id="typing"></div>
+  <footer>
+    <button class="iconbtn" id="attach" title="Send files">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+    </button>
+    <input type="file" id="file-input" multiple class="hidden" />
+    <textarea id="input" rows="1" placeholder="Message"></textarea>
+    <button class="iconbtn" id="send" title="Send">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M3.4 20.4 21.85 12 3.4 3.6 3.39 10.2 16.2 12 3.39 13.8z"/></svg>
+    </button>
+  </footer>
+</div>
+
+<div id="drop-overlay" class="hidden">
+  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+  Drop files to send
+</div>
+
+<script>
+(function () {
+  // This page only works when served by the Bliink app's web server
+  if (location.protocol === "file:") {
+    document.getElementById("file-notice").classList.remove("hidden");
+    return;
+  }
+  document.getElementById("login").classList.remove("hidden");
+
+  var token = localStorage.getItem("bliink-token") || "";
+  var hostName = localStorage.getItem("bliink-host") || "Bliink";
+  var ws = null;
+  var typingTimer = null;
+  var sentTyping = false;
+  var rendered = {};
+  var lastDay = "";
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function fmtBytes(n) {
+    if (!n) return "0 B";
+    var u = ["B", "KB", "MB", "GB"]; var i = Math.floor(Math.log(n) / Math.log(1024));
+    i = Math.min(i, u.length - 1);
+    return (n / Math.pow(1024, i)).toFixed(i ? 1 : 0) + " " + u[i];
+  }
+  function fmtTime(ts) {
+    var d = new Date(ts);
+    return d.getHours().toString().padStart(2, "0") + ":" + d.getMinutes().toString().padStart(2, "0");
+  }
+  function dayLabel(ts) {
+    var d = new Date(ts), now = new Date();
+    if (d.toDateString() === now.toDateString()) return "Today";
+    var y = new Date(now); y.setDate(y.getDate() - 1);
+    if (d.toDateString() === y.toDateString()) return "Yesterday";
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+  function esc(s) {
+    var div = document.createElement("div");
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  // ── Segmented code input ──
+  var codeInput = $("code");
+  var boxes = Array.prototype.slice.call(document.querySelectorAll(".code-box"));
+  function renderCode() {
+    var v = codeInput.value;
+    boxes.forEach(function (box, i) {
+      box.textContent = v[i] || "";
+      box.classList.toggle("active", i === Math.min(v.length, 5) && document.activeElement === codeInput);
+    });
+  }
+  $("code-wrap").addEventListener("click", function () { codeInput.focus(); });
+  codeInput.addEventListener("focus", renderCode);
+  codeInput.addEventListener("blur", function () {
+    boxes.forEach(function (b) { b.classList.remove("active"); });
+  });
+  codeInput.addEventListener("input", function () {
+    codeInput.value = codeInput.value.replace(/\D/g, "").slice(0, 6);
+    renderCode();
+    if (codeInput.value.length === 6) doAuth();
+  });
+  codeInput.addEventListener("keydown", function (e) { if (e.key === "Enter") doAuth(); });
+  $("name").addEventListener("keydown", function (e) { if (e.key === "Enter") codeInput.focus(); });
+
+  // ── Login ──
+  $("connect").addEventListener("click", doAuth);
+
+  function setBusy(busy) {
+    $("connect").disabled = busy;
+    $("connect-label").innerHTML = busy ? '<span class="spinner"></span>' : "Connect";
+  }
+
+  function doAuth() {
+    var name = $("name").value.trim() || "Web user";
+    var code = codeInput.value.trim();
+    if (code.length !== 6) {
+      $("login-error").textContent = "Enter the 6-digit code from the Bliink app";
+      codeInput.focus();
+      return;
+    }
+    setBusy(true);
+    $("login-error").textContent = "";
+    fetch("/api/auth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: code, name: name }),
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        setBusy(false);
+        if (!res.ok) {
+          $("login-error").textContent = res.j.error || "Connection failed";
+          codeInput.value = "";
+          renderCode();
+          return;
+        }
+        token = res.j.token;
+        hostName = res.j.hostName || "Bliink";
+        localStorage.setItem("bliink-token", token);
+        localStorage.setItem("bliink-host", hostName);
+        enterChat();
+      })
+      .catch(function () {
+        setBusy(false);
+        $("login-error").textContent = "Can't reach Bliink — is Web Access still running?";
+      });
+  }
+
+  function enterChat() {
+    $("login").classList.add("hidden");
+    $("chat").classList.remove("hidden");
+    $("host-name").textContent = hostName;
+    $("host-avatar").textContent = (hostName[0] || "B").toUpperCase();
+    loadHistory();
+    connectWs();
+  }
+
+  function loadHistory() {
+    fetch("/api/messages?token=" + encodeURIComponent(token))
+      .then(function (r) { if (!r.ok) throw 0; return r.json(); })
+      .then(function (msgs) {
+        msgs.forEach(function (m) { renderMessage(m); });
+        scrollDown(true);
+        markHostRead();
+      })
+      .catch(function () { logout(); });
+  }
+
+  function logout() {
+    localStorage.removeItem("bliink-token");
+    token = "";
+    $("chat").classList.add("hidden");
+    $("login").classList.remove("hidden");
+    if (ws) try { ws.close(); } catch (e) {}
+  }
+
+  // ── WebSocket ──
+  function connectWs() {
+    if (!token) return;
+    var proto = location.protocol === "https:" ? "wss://" : "ws://";
+    ws = new WebSocket(proto + location.host + "/api/ws?token=" + encodeURIComponent(token));
+    ws.onopen = function () { setConn(true); };
+    ws.onclose = function () {
+      setConn(false);
+      ws = null;
+      if (token) setTimeout(connectWs, 3000);
+    };
+    ws.onmessage = function (e) {
+      var data;
+      try { data = JSON.parse(e.data); } catch (err) { return; }
+      if (data.type === "message") {
+        renderMessage(data.message);
+        scrollDown(false);
+        if (data.message.direction === "out" && document.hasFocus()) {
+          sendWs({ type: "read", ids: [data.message.id] });
+          var el = rendered[data.message.id];
+          if (el) el.dataset.readSent = "1";
+        }
+      } else if (data.type === "typing") {
+        $("typing").innerHTML = data.typing
+          ? esc(hostName) + ' is typing <span class="tdots"><span></span><span></span><span></span></span>'
+          : "";
+      } else if (data.type === "read") {
+        (data.ids || []).forEach(function (id) {
+          var el = rendered[id];
+          if (el) {
+            var t = el.querySelector(".ticks");
+            if (t) { t.textContent = "✓✓"; t.classList.add("read"); }
+          }
+        });
+      }
+    };
+  }
+  function sendWs(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+  function setConn(on) {
+    $("conn-dot").className = "dot" + (on ? " on" : "");
+    $("conn-text").textContent = on ? "Connected" : "Reconnecting…";
+  }
+  window.addEventListener("focus", markHostRead);
+  function markHostRead() {
+    var ids = [];
+    document.querySelectorAll(".msg.theirs[data-id]").forEach(function (el) {
+      if (!el.dataset.readSent) { el.dataset.readSent = "1"; ids.push(el.dataset.id); }
+    });
+    if (ids.length) sendWs({ type: "read", ids: ids });
+  }
+
+  // ── Rendering ──
+  var FILE_SVG = '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>';
+
+  function renderMessage(m) {
+    if (rendered[m.id]) {
+      var t0 = rendered[m.id].querySelector(".ticks");
+      if (t0 && m.direction === "in" && m.status === "read") {
+        t0.textContent = "✓✓"; t0.classList.add("read");
+      }
+      return;
+    }
+    var mine = m.direction === "in"; // host's "in" = sent by this browser
+    var day = dayLabel(m.createdAt);
+    if (day !== lastDay) {
+      lastDay = day;
+      var sep = document.createElement("div");
+      sep.className = "day-sep";
+      sep.innerHTML = "<span>" + esc(day) + "</span>";
+      $("messages").appendChild(sep);
+    }
+
+    var wrap = document.createElement("div");
+    wrap.className = "msg " + (mine ? "mine" : "theirs");
+    wrap.dataset.id = m.id;
+
+    var bubble = document.createElement("div");
+    bubble.className = "bubble";
+
+    if (m.attachmentKind) {
+      bubble.classList.add("media");
+      var url = "/api/attachments/" + m.id + "?token=" + encodeURIComponent(token);
+      if (m.attachmentKind === "image") {
+        bubble.innerHTML = '<a href="' + url + '" target="_blank"><img src="' + url + '" alt="" loading="lazy" /></a>';
+      } else if (m.attachmentKind === "voice") {
+        bubble.innerHTML = '<audio controls preload="metadata" src="' + url + '"></audio>';
+      } else {
+        bubble.innerHTML =
+          '<a class="filecard" href="' + url + '" download>' +
+          '<span class="ficon">' + FILE_SVG + "</span>" +
+          '<span class="fmeta"><span class="fname">' + esc(m.attachmentName || "File") + "</span>" +
+          '<div class="fsize">' + fmtBytes(m.attachmentSize || 0) + "</div></span></a>";
+      }
+    } else {
+      bubble.innerHTML = esc(m.text || "");
+    }
+
+    var meta = document.createElement("div");
+    meta.className = "meta";
+    var ticksHtml = "";
+    if (mine) {
+      var read = m.status === "read";
+      ticksHtml = ' <span class="ticks' + (read ? " read" : "") + '">' + (read ? "✓✓" : "✓") + "</span>";
+    }
+    meta.innerHTML = fmtTime(m.createdAt) + ticksHtml;
+
+    wrap.appendChild(bubble);
+    wrap.appendChild(meta);
+    $("messages").appendChild(wrap);
+    rendered[m.id] = wrap;
+  }
+
+  function scrollDown(force) {
+    var el = $("messages");
+    var nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+    if (force || nearBottom) el.scrollTop = el.scrollHeight;
+  }
+
+  // ── Sending ──
+  $("send").addEventListener("click", sendText);
+  $("input").addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendText(); }
+  });
+  $("input").addEventListener("input", function () {
+    this.style.height = "auto";
+    this.style.height = Math.min(this.scrollHeight, 130) + "px";
+    if (!sentTyping) { sentTyping = true; sendWs({ type: "typing", typing: true }); }
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(function () {
+      sentTyping = false;
+      sendWs({ type: "typing", typing: false });
+    }, 2000);
+  });
+
+  function sendText() {
+    var text = $("input").value.trim();
+    if (!text) return;
+    $("input").value = "";
+    $("input").style.height = "auto";
+    sentTyping = false;
+    sendWs({ type: "typing", typing: false });
+    fetch("/api/messages?token=" + encodeURIComponent(token), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text }),
+    })
+      .then(function (r) { if (!r.ok) throw 0; return r.json(); })
+      .then(function (m) { renderMessage(m); scrollDown(true); })
+      .catch(function () {
+        $("typing").innerHTML = '<span style="color:var(--danger)">Failed to send — is the Bliink app still running?</span>';
+      });
+  }
+
+  // ── Files ──
+  $("attach").addEventListener("click", function () { $("file-input").click(); });
+  $("file-input").addEventListener("change", function () {
+    sendFiles(Array.prototype.slice.call(this.files));
+    this.value = "";
+  });
+
+  var dragDepth = 0;
+  document.addEventListener("dragenter", function (e) {
+    e.preventDefault();
+    if (++dragDepth === 1) $("drop-overlay").classList.remove("hidden");
+  });
+  document.addEventListener("dragleave", function (e) {
+    e.preventDefault();
+    if (--dragDepth <= 0) { dragDepth = 0; $("drop-overlay").classList.add("hidden"); }
+  });
+  document.addEventListener("dragover", function (e) { e.preventDefault(); });
+  document.addEventListener("drop", function (e) {
+    e.preventDefault();
+    dragDepth = 0;
+    $("drop-overlay").classList.add("hidden");
+    if (e.dataTransfer && e.dataTransfer.files.length) {
+      sendFiles(Array.prototype.slice.call(e.dataTransfer.files));
+    }
+  });
+
+  function sendFiles(files) {
+    files.reduce(function (chain, file) {
+      return chain.then(function () { return uploadFile(file); });
+    }, Promise.resolve());
+  }
+
+  function uploadFile(file) {
+    return new Promise(function (resolve) {
+      var wrap = document.createElement("div");
+      wrap.className = "msg mine uploading";
+      wrap.innerHTML =
+        '<div class="bubble media"><div class="filecard"><span class="ficon">' + FILE_SVG + "</span>" +
+        '<span class="fmeta"><span class="fname">' + esc(file.name) + "</span>" +
+        '<div class="fsize">' + fmtBytes(file.size) + "</div>" +
+        '<div class="progress"><div></div></div></span></div></div>';
+      $("messages").appendChild(wrap);
+      scrollDown(true);
+      var bar = wrap.querySelector(".progress > div");
+
+      var fd = new FormData();
+      fd.append("file", file);
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/attachments?token=" + encodeURIComponent(token));
+      xhr.upload.onprogress = function (e) {
+        if (e.lengthComputable) bar.style.width = ((e.loaded / e.total) * 100).toFixed(1) + "%";
+      };
+      xhr.onload = function () {
+        wrap.remove();
+        if (xhr.status === 200) {
+          try { renderMessage(JSON.parse(xhr.responseText)); } catch (e) {}
+          scrollDown(true);
+        }
+        resolve();
+      };
+      xhr.onerror = function () { wrap.remove(); resolve(); };
+      xhr.send(fd);
+    });
+  }
+
+  // ── Boot: token reuse ──
+  if (token) {
+    fetch("/api/messages?token=" + encodeURIComponent(token))
+      .then(function (r) {
+        if (r.ok) { enterChat(); }
+        else { localStorage.removeItem("bliink-token"); }
+      })
+      .catch(function () {});
+  }
+})();
+</script>
+</body>
+</html>

@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
-const WEB_CLIENT_HTML: &str = include_str!("../web_client.html");
+const WEB_CLIENT_HTML: &str = include_str!("../assets/web/index.html");
 const MAX_AUTH_FAILURES: u32 = 15;
 const MAX_UPLOAD_BYTES: usize = 4 * 1024 * 1024 * 1024; // 4 GB
 
@@ -92,15 +92,6 @@ impl WebBroker {
         };
         drop(sessions);
         tx.send(json).await.is_ok()
-    }
-
-    pub async fn is_online(&self, session_id: &str) -> bool {
-        self.sessions
-            .read()
-            .await
-            .get(session_id)
-            .map(|s| s.tx.is_some())
-            .unwrap_or(false)
     }
 
     pub async fn online_ids(&self) -> Vec<String> {
@@ -185,6 +176,11 @@ pub async fn start_server(
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .map_err(|e| format!("Could not bind port {}: {}", port, e))?;
+    // Report the real port (matters when asked for port 0 in tests)
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Listener error: {}", e))?
+        .port();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
@@ -496,6 +492,104 @@ async fn download_attachment(
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn http_request(port: u16, raw: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect to test server");
+        stream.write_all(raw.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    fn json_field(body: &str, field: &str) -> Option<String> {
+        let key = format!("\"{}\":\"", field);
+        let start = body.find(&key)? + key.len();
+        let end = body[start..].find('"')? + start;
+        Some(body[start..end].to_string())
+    }
+
+    async fn test_service() -> (Arc<ChatService>, Arc<WebBroker>) {
+        let dir = std::env::temp_dir().join(format!("bliink-web-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::chat::ChatStore::new(&dir.join("test.db")).unwrap());
+        let discovery = Arc::new(tokio::sync::Mutex::new(
+            crate::discovery::DiscoveryService::new("Test Host", 0, 0, "test-device").unwrap(),
+        ));
+        let transfer = Arc::new(crate::transfer::TransferEngine::new());
+        let broker = Arc::new(WebBroker::default());
+        let chat = Arc::new(ChatService::new(
+            "test-device".to_string(),
+            "Test Host".to_string(),
+            0,
+            store,
+            discovery,
+            transfer,
+            dir,
+            broker.clone(),
+        ));
+        (chat, broker)
+    }
+
+    #[tokio::test]
+    async fn serves_page_and_handles_auth_and_messages() {
+        let (chat, broker) = test_service().await;
+        let handle = start_server(chat.clone(), broker, 0).await.unwrap();
+        let port = handle.port;
+        assert_ne!(port, 0, "server should report its real port");
+
+        // The client page is served at /
+        let resp = http_request(port, "GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "GET / failed: {}", &resp[..resp.len().min(80)]);
+        assert!(resp.contains("Bliink"));
+
+        // Wrong code is rejected
+        let wrong_code = if handle.code == "000000" { "000001" } else { "000000" };
+        let body = format!(r#"{{"code":"{}","name":"Tester"}}"#, wrong_code);
+        let req = format!(
+            "POST /api/auth HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        let resp = http_request(port, &req).await;
+        assert!(resp.starts_with("HTTP/1.1 401"), "wrong code should 401: {}", &resp[..resp.len().min(80)]);
+
+        // Right code authenticates and returns a token
+        let body = format!(r#"{{"code":"{}","name":"Tester"}}"#, handle.code);
+        let req = format!(
+            "POST /api/auth HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        let resp = http_request(port, &req).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "auth failed: {}", &resp[..resp.len().min(120)]);
+        let token = json_field(&resp, "token").expect("token in auth response");
+        let session_id = json_field(&resp, "sessionId").expect("sessionId in auth response");
+
+        // Sending a message stores it in the host's chat
+        let body = r#"{"text":"hello from the browser"}"#;
+        let req = format!(
+            "POST /api/messages?token={} HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            token, body.len(), body
+        );
+        let resp = http_request(port, &req).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "post message failed: {}", &resp[..resp.len().min(120)]);
+
+        let messages = chat.get_messages(&session_id, 10).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text.as_deref(), Some("hello from the browser"));
+        assert_eq!(messages[0].direction, "in");
+
+        // A bogus token is rejected
+        let req = "GET /api/messages?token=bogus HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n";
+        let resp = http_request(port, req).await;
+        assert!(resp.starts_with("HTTP/1.1 401"), "bogus token should 401");
+    }
 }
 
 fn guess_content_type(name: &str) -> &'static str {
