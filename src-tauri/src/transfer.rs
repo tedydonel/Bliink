@@ -1,4 +1,5 @@
-use crate::crypto::SecureStream;
+use crate::crypto::{DynStream, SecureStream};
+use crate::p2p::P2pService;
 use crate::types::{
     TransferCode, TransferDirection, TransferItem, TransferProgress, TransferRequest,
     TransferStatus,
@@ -95,9 +96,43 @@ struct BatchDecision {
     decided_at: i64,
 }
 
+/// Where a transfer connects to: a LAN/VPN address or an internet peer.
+#[derive(Debug, Clone)]
+pub enum SendTarget {
+    /// "ip:port"
+    Tcp(String),
+    /// Bliink ID (iroh NodeId)
+    P2p(String),
+}
+
+impl std::fmt::Display for SendTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendTarget::Tcp(addr) => write!(f, "{}", addr),
+            SendTarget::P2p(node) => write!(f, "p2p:{}…", &node[..node.len().min(12)]),
+        }
+    }
+}
+
+impl SendTarget {
+    /// Resolve how to reach a device: internet peers (Bliink ID, no LAN
+    /// address) go over iroh, everything else over TCP.
+    pub fn for_device(device: &crate::types::Device) -> Result<Self, String> {
+        if let Some(node_id) = device.node_id.clone() {
+            if device.ip.is_empty() || device.port == 0 {
+                return Ok(SendTarget::P2p(node_id));
+            }
+        }
+        if device.ip.is_empty() || device.port == 0 {
+            return Err("Device has no reachable address".to_string());
+        }
+        Ok(SendTarget::Tcp(format!("{}:{}", device.ip, device.port)))
+    }
+}
+
 struct SendJob {
     path: PathBuf,
-    target: String,
+    target: SendTarget,
     device_id: String,
     device_name: String,
     sender_id: String,
@@ -112,7 +147,7 @@ struct SendJob {
 pub struct PreparedSend {
     transfer_id: String,
     path: PathBuf,
-    target: String,
+    target: SendTarget,
     header: TransferHeader,
     chunk_size: usize,
 }
@@ -130,6 +165,7 @@ pub struct TransferEngine {
     require_pin: Arc<RwLock<bool>>,
     pending_requests: Arc<RwLock<HashMap<String, oneshot::Sender<bool>>>>,
     batch_decisions: Arc<RwLock<HashMap<String, BatchDecision>>>,
+    p2p: Arc<RwLock<Option<Arc<P2pService>>>>,
 }
 
 /// Everything an incoming connection handler needs, cloned per connection.
@@ -170,6 +206,36 @@ impl TransferEngine {
             require_pin: Arc::new(RwLock::new(false)),
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
             batch_decisions: Arc::new(RwLock::new(HashMap::new())),
+            p2p: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn set_p2p(&self, p2p: Arc<P2pService>) {
+        let slot = self.p2p.clone();
+        tokio::spawn(async move {
+            *slot.write().await = Some(p2p);
+        });
+    }
+
+    /// Open the transport for a send: TCP for LAN/VPN peers, iroh for
+    /// internet peers.
+    async fn connect_target(&self, target: &SendTarget) -> Result<DynStream, String> {
+        match target {
+            SendTarget::Tcp(addr) => {
+                let stream = TcpStream::connect(addr)
+                    .await
+                    .map_err(|e| format!("Connection failed: {}", e))?;
+                Ok(Box::new(stream))
+            }
+            SendTarget::P2p(node) => {
+                let p2p = self
+                    .p2p
+                    .read()
+                    .await
+                    .clone()
+                    .ok_or_else(|| "Internet connectivity is not available".to_string())?;
+                p2p.open_stream(node, crate::p2p::STREAM_TRANSFER).await
+            }
         }
     }
 
@@ -227,12 +293,8 @@ impl TransferEngine {
         }
     }
 
-    pub async fn start_with_listener(&self, listener: TcpListener) -> Result<(), String> {
-        let local_addr = listener.local_addr()
-            .map_err(|e| format!("Failed to get local address: {}", e))?;
-        info!("Transfer listener started on {}", local_addr);
-
-        let ctx = ReceiverCtx {
+    fn receiver_ctx(&self) -> ReceiverCtx {
+        ReceiverCtx {
             active: self.active_transfers.clone(),
             command_tx: self.command_tx.clone(),
             progress_tx: self.progress_tx.clone(),
@@ -243,7 +305,26 @@ impl TransferEngine {
             require_pin: self.require_pin.clone(),
             pending: self.pending_requests.clone(),
             batches: self.batch_decisions.clone(),
-        };
+        }
+    }
+
+    /// Handle an incoming transfer arriving over any transport (used by the
+    /// P2P accept loop; the TCP listener uses the same path internally).
+    pub fn handle_incoming_stream(&self, stream: DynStream) {
+        let ctx = self.receiver_ctx();
+        tokio::spawn(async move {
+            if let Err(e) = handle_incoming(stream, ctx).await {
+                error!("Transfer receive error: {}", e);
+            }
+        });
+    }
+
+    pub async fn start_with_listener(&self, listener: TcpListener) -> Result<(), String> {
+        let local_addr = listener.local_addr()
+            .map_err(|e| format!("Failed to get local address: {}", e))?;
+        info!("Transfer listener started on {}", local_addr);
+
+        let ctx = self.receiver_ctx();
 
         tokio::spawn(async move {
             loop {
@@ -252,7 +333,7 @@ impl TransferEngine {
                         info!("Incoming transfer from {}", addr);
                         let ctx = ctx.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_incoming(stream, ctx).await {
+                            if let Err(e) = handle_incoming(Box::new(stream), ctx).await {
                                 error!("Transfer receive error: {}", e);
                             }
                         });
@@ -367,9 +448,28 @@ impl TransferEngine {
     pub async fn run_send(&self, prepared: PreparedSend) {
         let mut command_rx = self.command_tx.subscribe();
         let tid = prepared.transfer_id.clone();
+
+        info!("Connecting to {}", prepared.target);
+        let stream = match self.connect_target(&prepared.target).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                error!("Transfer {} failed to connect: {}", tid, e);
+                set_status(&self.active_transfers, &tid, TransferStatus::Failed, Some(e.clone()))
+                    .await;
+                let _ = self.progress_tx.send(TransferProgress {
+                    id: tid,
+                    progress: 0.0,
+                    speed: 0.0,
+                    status: TransferStatus::Failed,
+                    error: Some(e),
+                });
+                return;
+            }
+        };
+
         match send_file_impl(
             &prepared.path,
-            &prepared.target,
+            stream,
             prepared.header,
             prepared.chunk_size,
             self.active_transfers.clone(),
@@ -408,17 +508,16 @@ impl TransferEngine {
     pub async fn send_file(
         self: &Arc<Self>,
         file_path: &str,
-        device_ip: &str,
-        device_port: u16,
+        target: SendTarget,
         device_id: &str,
         device_name: &str,
         sender_id: &str,
         sender_name: &str,
     ) -> Result<String, String> {
-        info!("Initiating send_file: path={}, target={}:{}", file_path, device_ip, device_port);
+        info!("Initiating send_file: path={}, target={}", file_path, target);
         let job = SendJob {
             path: PathBuf::from(file_path),
-            target: format!("{}:{}", device_ip, device_port),
+            target,
             device_id: device_id.to_string(),
             device_name: device_name.to_string(),
             sender_id: sender_id.to_string(),
@@ -438,8 +537,7 @@ impl TransferEngine {
     pub async fn send_chat_attachment(
         self: &Arc<Self>,
         file_path: &str,
-        device_ip: &str,
-        device_port: u16,
+        target: SendTarget,
         device_id: &str,
         device_name: &str,
         sender_id: &str,
@@ -448,7 +546,7 @@ impl TransferEngine {
     ) -> Result<String, String> {
         let job = SendJob {
             path: PathBuf::from(file_path),
-            target: format!("{}:{}", device_ip, device_port),
+            target,
             device_id: device_id.to_string(),
             device_name: device_name.to_string(),
             sender_id: sender_id.to_string(),
@@ -469,7 +567,7 @@ impl TransferEngine {
         self: &Arc<Self>,
         files: Vec<(PathBuf, Option<String>)>,
         batch: Option<BatchMeta>,
-        target: String,
+        target: SendTarget,
         device_id: String,
         device_name: String,
         sender_id: String,
@@ -524,8 +622,7 @@ impl TransferEngine {
     pub async fn send_files(
         self: &Arc<Self>,
         paths: Vec<String>,
-        device_ip: &str,
-        device_port: u16,
+        target: SendTarget,
         device_id: &str,
         device_name: &str,
         sender_id: &str,
@@ -563,7 +660,7 @@ impl TransferEngine {
         self.spawn_batch(
             files,
             batch,
-            format!("{}:{}", device_ip, device_port),
+            target,
             device_id.to_string(),
             device_name.to_string(),
             sender_id.to_string(),
@@ -579,8 +676,7 @@ impl TransferEngine {
     pub async fn send_folder(
         self: &Arc<Self>,
         folder_path: &str,
-        device_ip: &str,
-        device_port: u16,
+        target: SendTarget,
         device_id: &str,
         device_name: &str,
         sender_id: &str,
@@ -629,7 +725,7 @@ impl TransferEngine {
         self.spawn_batch(
             files,
             Some(batch),
-            format!("{}:{}", device_ip, device_port),
+            target,
             device_id.to_string(),
             device_name.to_string(),
             sender_id.to_string(),
@@ -735,7 +831,7 @@ async fn set_status(
 #[allow(clippy::too_many_arguments)]
 async fn send_file_impl(
     path: &Path,
-    target: &str,
+    stream: DynStream,
     header: TransferHeader,
     chunk_size: usize,
     active: Arc<RwLock<HashMap<String, TransferItem>>>,
@@ -744,15 +840,7 @@ async fn send_file_impl(
     command_rx: &mut broadcast::Receiver<TransferCommand>,
     transfer_id: &str,
 ) -> Result<(), String> {
-    info!("Connecting to target {}", target);
-    let stream = TcpStream::connect(target)
-        .await
-        .map_err(|e| {
-            error!("Failed to connect to {}: {}", target, e);
-            format!("Connection failed: {}", e)
-        })?;
-    info!("Connected to {}, negotiating encryption", target);
-
+    info!("Connected, negotiating encryption");
     let mut secure = SecureStream::connect(stream).await?;
 
     // Surface the session verification code so the user can compare screens
@@ -913,7 +1001,7 @@ async fn send_file_impl(
     Ok(())
 }
 
-async fn handle_incoming(stream: TcpStream, ctx: ReceiverCtx) -> Result<(), String> {
+async fn handle_incoming(stream: DynStream, ctx: ReceiverCtx) -> Result<(), String> {
     info!("Handling incoming connection, negotiating encryption");
     let mut secure = SecureStream::accept(stream).await?;
     let verification_code = secure.verification_code().to_string();

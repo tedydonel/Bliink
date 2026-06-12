@@ -267,12 +267,31 @@ function AddDeviceDialog({
   onAdded: () => void;
   onClose: () => void;
 }) {
+  const [mode, setMode] = useState<"internet" | "ip">("internet");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("9101");
+  const [bliinkId, setBliinkId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleAdd = async () => {
+    setError(null);
+    if (mode === "internet") {
+      if (!bliinkId.trim()) {
+        setError("Paste the other device's Bliink ID");
+        return;
+      }
+      setBusy(true);
+      try {
+        await api.addInternetDevice(bliinkId.trim());
+        onAdded();
+      } catch (e: any) {
+        setError(String(e?.message ?? e));
+        setBusy(false);
+      }
+      return;
+    }
+
     const portNum = Number(port);
     if (!host.trim()) {
       setError("Enter the device's IP address or hostname");
@@ -283,7 +302,6 @@ function AddDeviceDialog({
       return;
     }
     setBusy(true);
-    setError(null);
     try {
       await api.addManualDevice(host.trim(), portNum);
       onAdded();
@@ -295,15 +313,15 @@ function AddDeviceDialog({
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
-      <div className="w-[400px] p-6 rounded-2xl bg-surface border border-border shadow-2xl">
+      <div className="w-[420px] p-6 rounded-2xl bg-surface border border-border shadow-2xl">
         <div className="flex items-center gap-3 mb-1">
           <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-sky/10 border border-sky/20 shrink-0">
             <Globe className="w-5 h-5 text-sky" />
           </div>
           <div>
-            <p className="text-[15px] font-bold text-foreground">Add device by address</p>
+            <p className="text-[15px] font-bold text-foreground">Add a remote device</p>
             <p className="text-[11px] text-muted mt-0.5">
-              For devices outside this network (e.g. over a VPN like Tailscale)
+              Connect to a device that isn't on this network
             </p>
           </div>
           <button onClick={onClose} className="ml-auto p-1 text-muted hover:text-foreground">
@@ -311,36 +329,85 @@ function AddDeviceDialog({
           </button>
         </div>
 
-        <div className="mt-5 space-y-3">
-          <div>
-            <label className="text-[11px] font-bold text-muted uppercase tracking-wider block mb-1.5">
-              Host or IP address
-            </label>
-            <input
-              type="text"
-              value={host}
-              onChange={(e) => setHost(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-              placeholder="e.g. 100.84.12.7 or my-pc.tailnet.ts.net"
-              autoFocus
-              className="w-full h-10 px-3 rounded-lg bg-surface-active border border-border text-sm text-foreground focus:outline-none focus:border-accent/40 placeholder:text-muted/40"
-            />
-          </div>
-          <div>
-            <label className="text-[11px] font-bold text-muted uppercase tracking-wider block mb-1.5">
-              Port
-            </label>
-            <input
-              type="text"
-              value={port}
-              onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))}
-              onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-              className="w-full h-10 px-3 rounded-lg bg-surface-active border border-border text-sm text-foreground focus:outline-none focus:border-accent/40"
-            />
-            <p className="text-[11px] text-muted mt-1.5">
-              Shown on the other device under Settings → Remote Access
-            </p>
-          </div>
+        {/* Mode toggle */}
+        <div className="flex gap-1.5 mt-4 p-1 rounded-lg bg-surface-active border border-border">
+          {(
+            [
+              { key: "internet", label: "Over the internet" },
+              { key: "ip", label: "IP address / VPN" },
+            ] as const
+          ).map((m) => (
+            <button
+              key={m.key}
+              onClick={() => {
+                setMode(m.key);
+                setError(null);
+              }}
+              className={cn(
+                "flex-1 py-1.5 text-[12px] font-semibold rounded-md transition-all",
+                mode === m.key
+                  ? "bg-accent/15 text-accent border border-accent/20"
+                  : "text-muted hover:text-foreground border border-transparent"
+              )}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-4 space-y-3">
+          {mode === "internet" ? (
+            <div>
+              <label className="text-[11px] font-bold text-muted uppercase tracking-wider block mb-1.5">
+                Bliink ID
+              </label>
+              <textarea
+                value={bliinkId}
+                onChange={(e) => setBliinkId(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), handleAdd())}
+                placeholder="Paste the ID from the other device's Settings → Remote Access"
+                rows={2}
+                autoFocus
+                className="w-full px-3 py-2.5 rounded-lg bg-surface-active border border-border text-[13px] font-mono text-foreground focus:outline-none focus:border-accent/40 placeholder:text-muted/40 placeholder:font-sans resize-none break-all"
+              />
+              <p className="text-[11px] text-muted mt-1.5">
+                Works from anywhere — connects directly when possible, falls back
+                to an encrypted relay otherwise. Both devices need internet access.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div>
+                <label className="text-[11px] font-bold text-muted uppercase tracking-wider block mb-1.5">
+                  Host or IP address
+                </label>
+                <input
+                  type="text"
+                  value={host}
+                  onChange={(e) => setHost(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+                  placeholder="e.g. 100.84.12.7 or my-pc.tailnet.ts.net"
+                  autoFocus
+                  className="w-full h-10 px-3 rounded-lg bg-surface-active border border-border text-sm text-foreground focus:outline-none focus:border-accent/40 placeholder:text-muted/40"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-muted uppercase tracking-wider block mb-1.5">
+                  Port
+                </label>
+                <input
+                  type="text"
+                  value={port}
+                  onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))}
+                  onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+                  className="w-full h-10 px-3 rounded-lg bg-surface-active border border-border text-sm text-foreground focus:outline-none focus:border-accent/40"
+                />
+                <p className="text-[11px] text-muted mt-1.5">
+                  Shown on the other device under Settings → Remote Access
+                </p>
+              </div>
+            </>
+          )}
 
           {error && (
             <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-danger/10 border border-danger/20 text-danger text-[12px]">

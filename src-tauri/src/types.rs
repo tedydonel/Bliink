@@ -48,6 +48,9 @@ pub struct Device {
     /// False when the peer runs a different protocol version.
     #[serde(default = "default_true")]
     pub compatible: bool,
+    /// Bliink ID for internet peers reached through iroh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -218,6 +221,9 @@ pub struct ManualDevice {
     pub device_id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    /// Set for internet peers added by Bliink ID (host/port unused).
+    #[serde(default)]
+    pub node_id: Option<String>,
 }
 
 /// Settings and device identity persisted to settings.json in the app data dir.
@@ -228,6 +234,10 @@ pub struct PersistedConfig {
     pub settings: AppSettings,
     #[serde(default)]
     pub manual_devices: Vec<ManualDevice>,
+    /// Hex-encoded ed25519 secret for the iroh endpoint — keeps the
+    /// device's Bliink ID stable across launches.
+    #[serde(default)]
+    pub p2p_secret: Option<String>,
 }
 
 // ─── Chat ───────────────────────────────────────────────────────

@@ -50,6 +50,18 @@ export default function SettingsPage() {
     }
   }, [networkInfo]);
 
+  const [copiedId, setCopiedId] = useState(false);
+  const handleCopyBliinkId = useCallback(async () => {
+    if (!networkInfo?.bliinkId) return;
+    try {
+      await navigator.clipboard.writeText(networkInfo.bliinkId);
+      setCopiedId(true);
+      setTimeout(() => setCopiedId(false), 2000);
+    } catch (e) {
+      console.error("Clipboard error:", e);
+    }
+  }, [networkInfo]);
+
   const persistSettings = useCallback((merged: AppSettings) => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(async () => {
@@ -254,9 +266,32 @@ export default function SettingsPage() {
           <div className="p-4 rounded-xl bg-surface border border-border">
             <div className="flex items-center justify-between gap-4">
               <div className="min-w-0">
-                <p className="text-sm font-medium text-foreground">Your address</p>
+                <p className="text-sm font-medium text-foreground">Bliink ID</p>
                 <p className="text-xs text-muted mt-0.5">
-                  Another device can add you from its Devices page using this address
+                  Share this to connect from anywhere over the internet — no setup needed
+                </p>
+              </div>
+              <button
+                onClick={handleCopyBliinkId}
+                disabled={!networkInfo?.bliinkId}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface-active border border-border text-[12px] font-mono text-foreground hover:border-accent/40 transition-colors shrink-0 max-w-[280px]"
+                title="Copy Bliink ID"
+              >
+                <span className="truncate">
+                  {networkInfo?.bliinkId ?? "Starting…"}
+                </span>
+                {copiedId ? (
+                  <Check className="w-3.5 h-3.5 text-success shrink-0" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5 text-muted shrink-0" />
+                )}
+              </button>
+            </div>
+            <div className="flex items-center justify-between gap-4 mt-3 pt-3 border-t border-border">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-foreground">Local address</p>
+                <p className="text-xs text-muted mt-0.5">
+                  For devices on this network or a VPN like Tailscale
                 </p>
               </div>
               <button
@@ -273,11 +308,10 @@ export default function SettingsPage() {
               </button>
             </div>
             <p className="text-[11px] text-muted mt-3 pt-3 border-t border-border">
-              Works across the internet through a VPN like{" "}
-              <span className="text-accent font-semibold">Tailscale</span> — install it on
-              both machines and use the Tailscale IP here. Direct internet use requires
-              port forwarding; enabling <span className="font-semibold">Require Code Check</span>{" "}
-              is strongly recommended.
+              Internet connections punch through routers directly when possible and fall
+              back to an encrypted relay. Everything stays end-to-end encrypted either
+              way — enable <span className="font-semibold">Require Code Check</span> for
+              extra assurance with new devices.
             </p>
           </div>
         </section>

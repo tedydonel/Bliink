@@ -108,7 +108,9 @@ export default function DeviceCard({
           )}
         </div>
         <div className="flex items-center gap-2 mt-0.5">
-          <span className="text-xs text-muted">{device.ip}</span>
+          <span className="text-xs text-muted">
+            {device.ip || (device.nodeId ? "Internet · P2P" : "Unknown")}
+          </span>
           {device.os && (
             <>
               <span className="text-xs text-border-bright">•</span>

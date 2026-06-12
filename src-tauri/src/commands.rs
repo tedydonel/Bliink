@@ -1,7 +1,8 @@
 use crate::chat::ChatService;
 use crate::discovery::DiscoveryService;
 use crate::history::HistoryStore;
-use crate::transfer::TransferEngine;
+use crate::p2p::P2pService;
+use crate::transfer::{SendTarget, TransferEngine};
 use crate::web::{WebBroker, WebServerHandle};
 use crate::types::{
     AppSettings, ChatMessage, Conversation, Device, DeviceStatus, DeviceType, HistoryEntry,
@@ -27,6 +28,8 @@ pub struct AppState {
     pub chat_port: u16,
     pub web_broker: Arc<WebBroker>,
     pub web_server: Arc<Mutex<Option<WebServerHandle>>>,
+    pub p2p: Arc<Mutex<Option<Arc<P2pService>>>>,
+    pub p2p_secret: Option<String>,
 }
 
 const WEB_ACCESS_PORT: u16 = 9102;
@@ -49,8 +52,28 @@ impl AppState {
             device_id: self.device_id.clone(),
             settings: self.settings.lock().await.clone(),
             manual_devices: self.manual_devices.lock().await.clone(),
+            p2p_secret: self.p2p_secret.clone(),
         };
         crate::config::save(&self.config_path, &cfg)
+    }
+
+    /// How to reach a device for a transfer: prefer what discovery knows
+    /// (covers internet peers), fall back to the address the UI passed.
+    async fn resolve_target(
+        &self,
+        device_id: &str,
+        fallback_ip: &str,
+        fallback_port: u16,
+    ) -> Result<SendTarget, String> {
+        if let Some(device) = self.discovery.lock().await.get_device(device_id) {
+            if let Ok(target) = SendTarget::for_device(&device) {
+                return Ok(target);
+            }
+        }
+        if fallback_ip.is_empty() || fallback_port == 0 {
+            return Err("Device has no reachable address".to_string());
+        }
+        Ok(SendTarget::Tcp(format!("{}:{}", fallback_ip, fallback_port)))
     }
 }
 
@@ -69,10 +92,12 @@ pub fn offline_manual_device(m: &ManualDevice) -> Option<Device> {
         last_seen: 0,
         manual: true,
         compatible: true,
+        node_id: m.node_id.clone(),
     })
 }
 
-/// Try to reach every saved manual device and refresh its entry.
+/// Try to reach every saved manual device (by address or Bliink ID) and
+/// refresh its entry.
 pub fn spawn_manual_probes(
     chat: Arc<ChatService>,
     discovery: Arc<Mutex<DiscoveryService>>,
@@ -80,12 +105,20 @@ pub fn spawn_manual_probes(
 ) {
     tokio::spawn(async move {
         for m in devices {
-            match chat.probe_remote(&m.host, m.port).await {
+            let result = match &m.node_id {
+                Some(node_id) => chat.probe_p2p(node_id).await,
+                None => chat.probe_remote(&m.host, m.port).await,
+            };
+            match result {
                 Ok(device) => {
                     discovery.lock().await.upsert_manual(device);
                 }
                 Err(e) => {
-                    warn!("Manual device {}:{} unreachable: {}", m.host, m.port, e);
+                    warn!(
+                        "Manual device {} unreachable: {}",
+                        m.node_id.as_deref().unwrap_or(&m.host),
+                        e
+                    );
                     if let Some(device) = offline_manual_device(&m) {
                         discovery.lock().await.upsert_manual(device);
                     }
@@ -157,11 +190,47 @@ pub async fn add_manual_device(
             port,
             device_id: Some(device.id.clone()),
             name: Some(device.name.clone()),
+            node_id: None,
         });
     }
     state.persist_config().await?;
 
     info!("Added remote device {} ({})", device.name, device.ip);
+    Ok(device)
+}
+
+/// Add an internet peer by its Bliink ID — connects through iroh with NAT
+/// hole punching and relay fallback.
+#[tauri::command]
+pub async fn add_internet_device(
+    state: State<'_, AppState>,
+    node_id: String,
+) -> Result<Device, String> {
+    let node_id = node_id.trim().to_string();
+    if node_id.is_empty() {
+        return Err("Enter a Bliink ID".to_string());
+    }
+
+    let device = state.chat.probe_p2p(&node_id).await?;
+    state.discovery.lock().await.upsert_manual(device.clone());
+
+    {
+        let mut list = state.manual_devices.lock().await;
+        list.retain(|m| {
+            m.node_id.as_deref() != Some(node_id.as_str())
+                && m.device_id.as_deref() != Some(device.id.as_str())
+        });
+        list.push(ManualDevice {
+            host: String::new(),
+            port: 0,
+            device_id: Some(device.id.clone()),
+            name: Some(device.name.clone()),
+            node_id: Some(node_id),
+        });
+    }
+    state.persist_config().await?;
+
+    info!("Added internet device {}", device.name);
     Ok(device)
 }
 
@@ -183,10 +252,12 @@ pub async fn remove_manual_device(
 /// with remote peers.
 #[tauri::command]
 pub async fn get_network_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let bliink_id = state.p2p.lock().await.as_ref().map(|p| p.node_id());
     Ok(serde_json::json!({
         "ip": local_ip(),
         "chatPort": state.chat_port,
         "transferPort": state.transfer_port,
+        "bliinkId": bliink_id,
     }))
 }
 
@@ -281,12 +352,12 @@ pub async fn send_file(
     let sender_name = settings.device_name.clone();
     drop(settings);
 
+    let target = state.resolve_target(&device_id, &device_ip, device_port).await?;
     let transfer_id = state
         .transfer
         .send_file(
             &file_path,
-            &device_ip,
-            device_port,
+            target,
             &device_id,
             &device_name,
             &state.device_id,
@@ -312,12 +383,12 @@ pub async fn send_files(
     let sender_name = settings.device_name.clone();
     drop(settings);
 
+    let target = state.resolve_target(&device_id, &device_ip, device_port).await?;
     state
         .transfer
         .send_files(
             paths,
-            &device_ip,
-            device_port,
+            target,
             &device_id,
             &device_name,
             &state.device_id,
@@ -341,12 +412,12 @@ pub async fn send_folder(
     let sender_name = settings.device_name.clone();
     drop(settings);
 
+    let target = state.resolve_target(&device_id, &device_ip, device_port).await?;
     state
         .transfer
         .send_folder(
             &folder_path,
-            &device_ip,
-            device_port,
+            target,
             &device_id,
             &device_name,
             &state.device_id,
@@ -545,6 +616,7 @@ pub async fn update_settings(
         device_id: state.device_id.clone(),
         settings: settings.clone(),
         manual_devices: state.manual_devices.lock().await.clone(),
+        p2p_secret: state.p2p_secret.clone(),
     };
     crate::config::save(&state.config_path, &cfg)?;
 

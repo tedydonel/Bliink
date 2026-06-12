@@ -187,6 +187,7 @@ impl DiscoveryService {
                                             manual: false,
                                             compatible: received_msg.protocol
                                                 == crate::types::PROTOCOL_VERSION,
+                                            node_id: None,
                                         };
 
                                         {

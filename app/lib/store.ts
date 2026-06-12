@@ -18,6 +18,8 @@ export interface Device {
   manual?: boolean;
   // False when the peer runs an incompatible protocol version
   compatible?: boolean;
+  // Bliink ID for internet peers (connected through P2P)
+  nodeId?: string | null;
 }
 
 // ─── Transfer Types ─────────────────────────────────────────────

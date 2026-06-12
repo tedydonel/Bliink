@@ -1,6 +1,7 @@
-use crate::crypto::SecureStream;
+use crate::crypto::{DynStream, SecureStream};
 use crate::discovery::DiscoveryService;
-use crate::transfer::TransferEngine;
+use crate::p2p::P2pService;
+use crate::transfer::{SendTarget, TransferEngine};
 use crate::types::{
     ChatMessage, Conversation, Device, DeviceStatus, DeviceType, TransferStatus, TypingEvent,
 };
@@ -362,6 +363,7 @@ pub struct ChatService {
     transfer: Arc<TransferEngine>,
     media_dir: PathBuf,
     web: Arc<crate::web::WebBroker>,
+    p2p: Arc<RwLock<Option<Arc<P2pService>>>>,
     channels: Arc<RwLock<HashMap<String, Channel>>>,
     /// transfer_id → (message_id, inbound)
     pending_attachments: Arc<RwLock<HashMap<String, (String, bool)>>>,
@@ -391,11 +393,19 @@ impl ChatService {
             transfer,
             media_dir,
             web,
+            p2p: Arc::new(RwLock::new(None)),
             channels: Arc::new(RwLock::new(HashMap::new())),
             pending_attachments: Arc::new(RwLock::new(HashMap::new())),
             events_tx,
             epoch: AtomicU64::new(0),
         }
+    }
+
+    pub fn set_p2p(&self, p2p: Arc<P2pService>) {
+        let slot = self.p2p.clone();
+        tokio::spawn(async move {
+            *slot.write().await = Some(p2p);
+        });
     }
 
     pub fn host_name(&self) -> &str {
@@ -434,7 +444,7 @@ impl ChatService {
                         info!("Incoming chat connection from {}", addr);
                         let svc = svc.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = svc.accept_channel(stream).await {
+                            if let Err(e) = svc.accept_channel(Box::new(stream)).await {
                                 warn!("Chat handshake failed: {}", e);
                             }
                         });
@@ -504,7 +514,18 @@ impl ChatService {
 
     // ── Channel management ──
 
-    async fn accept_channel(self: &Arc<Self>, stream: TcpStream) -> Result<(), String> {
+    /// Handle an incoming chat channel arriving over any transport (used by
+    /// the P2P accept loop; the TCP listener uses the same path internally).
+    pub fn handle_incoming_stream(self: &Arc<Self>, stream: DynStream) {
+        let svc = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = svc.accept_channel(stream).await {
+                warn!("Chat handshake failed: {}", e);
+            }
+        });
+    }
+
+    async fn accept_channel(self: &Arc<Self>, stream: DynStream) -> Result<(), String> {
         let mut secure = SecureStream::accept(stream).await?;
         let frame = timeout(HELLO_TIMEOUT, secure.recv_frame())
             .await
@@ -535,8 +556,8 @@ impl ChatService {
         Ok(())
     }
 
-    /// Dial a peer's chat port, exchange hellos, and register the channel.
-    /// Returns (peer_id, peer_name, peer_transfer_port, sender).
+    /// Dial a peer's chat port over TCP, exchange hellos, and register the
+    /// channel. Returns (peer_id, peer_name, peer_transfer_port, sender).
     async fn connect_to(
         self: &Arc<Self>,
         host: &str,
@@ -545,6 +566,28 @@ impl ChatService {
         let stream = TcpStream::connect((host, port))
             .await
             .map_err(|e| format!("Chat connection failed: {}", e))?;
+        self.outbound_handshake(Box::new(stream)).await
+    }
+
+    /// Dial a peer over the internet by Bliink ID.
+    async fn connect_p2p(
+        self: &Arc<Self>,
+        node_id: &str,
+    ) -> Result<(String, String, u16, mpsc::Sender<ChatWire>), String> {
+        let p2p = self
+            .p2p
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| "Internet connectivity is not available".to_string())?;
+        let stream = p2p.open_stream(node_id, crate::p2p::STREAM_CHAT).await?;
+        self.outbound_handshake(stream).await
+    }
+
+    async fn outbound_handshake(
+        self: &Arc<Self>,
+        stream: DynStream,
+    ) -> Result<(String, String, u16, mpsc::Sender<ChatWire>), String> {
         let mut secure = SecureStream::connect(stream).await?;
 
         secure
@@ -589,6 +632,15 @@ impl ChatService {
             discovery.get_device(device_id)
         }
         .ok_or_else(|| "Device is not reachable on the network".to_string())?;
+
+        // Internet peers are dialed by Bliink ID
+        if let Some(node_id) = device.node_id.clone() {
+            if device.ip.is_empty() || device.chat_port == 0 {
+                let (_, _, _, tx) = self.connect_p2p(&node_id).await?;
+                return Ok(tx);
+            }
+        }
+
         if device.chat_port == 0 {
             return Err("This device is running an older Bliink without chat".to_string());
         }
@@ -616,6 +668,30 @@ impl ChatService {
             last_seen: chrono::Utc::now().timestamp_millis(),
             manual: true,
             compatible: true,
+            node_id: None,
+        })
+    }
+
+    /// Probe an internet peer by Bliink ID: connect through iroh, exchange
+    /// hellos, keep the channel, and return a Device entry.
+    pub async fn probe_p2p(self: &Arc<Self>, node_id: &str) -> Result<Device, String> {
+        let (peer_id, peer_name, _, _) = self.connect_p2p(node_id).await?;
+        if peer_id == self.device_id {
+            return Err("That Bliink ID is this device".to_string());
+        }
+        Ok(Device {
+            id: peer_id,
+            name: peer_name,
+            ip: String::new(),
+            port: 0,
+            chat_port: 0,
+            device_type: DeviceType::Unknown,
+            status: DeviceStatus::Online,
+            os: None,
+            last_seen: chrono::Utc::now().timestamp_millis(),
+            manual: true,
+            compatible: true,
+            node_id: Some(node_id.trim().to_string()),
         })
     }
 
@@ -894,14 +970,14 @@ impl ChatService {
             discovery.get_device(device_id)
         }
         .ok_or_else(|| "Device is not reachable on the network".to_string())?;
+        let target = SendTarget::for_device(&device)?;
 
         let msg_id = uuid::Uuid::new_v4().to_string();
         let transfer_id = self
             .transfer
             .send_chat_attachment(
                 file_path,
-                &device.ip,
-                device.port,
+                target,
                 device_id,
                 &device.name,
                 &self.device_id,

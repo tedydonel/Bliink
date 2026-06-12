@@ -229,8 +229,13 @@ class CallManager {
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
 
-    // LAN-only: host candidates are enough, no STUN/TURN needed
-    const pc = new RTCPeerConnection({ iceServers: [] });
+    // STUN lets calls traverse NATs for internet peers; on the LAN the
+    // host candidates win anyway.
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+      ],
+    });
     this.pc = pc;
     this.localStream.getTracks().forEach((track) => pc.addTrack(track, this.localStream!));
 

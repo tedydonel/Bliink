@@ -4,6 +4,7 @@ mod config;
 mod crypto;
 mod discovery;
 mod history;
+mod p2p;
 mod thumbs;
 mod transfer;
 mod types;
@@ -347,13 +348,61 @@ pub fn run() {
             let thumb_cache_dir = data_dir.join("thumbnails");
             let _ = std::fs::create_dir_all(&thumb_cache_dir);
 
-            // Reconnect to saved remote devices in the background
-            if !persisted.manual_devices.is_empty() {
-                commands::spawn_manual_probes(
-                    chat_service.clone(),
-                    discovery.clone(),
-                    persisted.manual_devices.clone(),
-                );
+            // Internet P2P (iroh): stable secret key → stable Bliink ID
+            let p2p_secret_hex = match persisted.p2p_secret.clone() {
+                Some(secret) => secret,
+                None => {
+                    let mut bytes = [0u8; 32];
+                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+                    let secret = hex::encode(bytes);
+                    let cfg = types::PersistedConfig {
+                        device_id: device_id.clone(),
+                        settings: persisted.settings.clone(),
+                        manual_devices: persisted.manual_devices.clone(),
+                        p2p_secret: Some(secret.clone()),
+                    };
+                    if let Err(e) = config::save(&config_path, &cfg) {
+                        error!("Failed to persist P2P key: {}", e);
+                    }
+                    secret
+                }
+            };
+            let p2p_secret_bytes: [u8; 32] = hex::decode(&p2p_secret_hex)
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .unwrap_or_else(|| {
+                    let mut bytes = [0u8; 32];
+                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+                    bytes
+                });
+
+            let p2p_state: Arc<Mutex<Option<Arc<p2p::P2pService>>>> =
+                Arc::new(Mutex::new(None));
+            {
+                // Start the endpoint in the background, then reconnect saved
+                // remote devices (both address- and Bliink-ID-based).
+                let transfer = transfer.clone();
+                let chat = chat_service.clone();
+                let discovery_probe = discovery.clone();
+                let manual = persisted.manual_devices.clone();
+                let p2p_slot = p2p_state.clone();
+                tauri::async_runtime::spawn(async move {
+                    match p2p::P2pService::new(p2p_secret_bytes).await {
+                        Ok(service) => {
+                            let service = Arc::new(service);
+                            transfer.set_p2p(service.clone());
+                            chat.set_p2p(service.clone());
+                            service.start(transfer, chat.clone());
+                            *p2p_slot.lock().await = Some(service);
+                        }
+                        Err(e) => {
+                            error!("Internet P2P unavailable: {}", e);
+                        }
+                    }
+                    if !manual.is_empty() {
+                        commands::spawn_manual_probes(chat, discovery_probe, manual);
+                    }
+                });
             }
 
             app.manage(AppState {
@@ -370,6 +419,8 @@ pub fn run() {
                 chat_port,
                 web_broker,
                 web_server: Arc::new(Mutex::new(None)),
+                p2p: p2p_state,
+                p2p_secret: Some(p2p_secret_hex),
             });
 
             info!("Bliink backend initialized");
@@ -396,6 +447,7 @@ pub fn run() {
             commands::get_file_metadata,
             commands::get_thumbnail,
             commands::add_manual_device,
+            commands::add_internet_device,
             commands::remove_manual_device,
             commands::get_network_info,
             commands::start_web_server,

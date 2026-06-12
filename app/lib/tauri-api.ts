@@ -74,6 +74,11 @@ export async function addManualDevice(
   return (await invoke!("add_manual_device", { host, port })) as Device;
 }
 
+export async function addInternetDevice(nodeId: string): Promise<Device> {
+  if (!(await ensureTauri())) throw new Error("Not available in browser");
+  return (await invoke!("add_internet_device", { nodeId })) as Device;
+}
+
 export async function removeManualDevice(deviceId: string): Promise<void> {
   if (!(await ensureTauri())) return;
   await invoke!("remove_manual_device", { deviceId });
@@ -83,6 +88,7 @@ export interface NetworkInfo {
   ip: string;
   chatPort: number;
   transferPort: number;
+  bliinkId?: string | null;
 }
 
 export async function getNetworkInfo(): Promise<NetworkInfo | null> {

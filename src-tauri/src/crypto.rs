@@ -1,14 +1,21 @@
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
 /// Generous upper bound: the largest chunk setting (8 MB) + GCM tag overhead.
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
-/// An encrypted, length-framed wrapper around a TcpStream.
+/// Any bidirectional byte stream — TCP sockets and iroh QUIC streams alike.
+pub trait Duplex: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> Duplex for T {}
+
+/// A boxed transport so the transfer/chat protocols don't care whether the
+/// bytes travel over the LAN (TCP) or the internet (iroh).
+pub type DynStream = Box<dyn Duplex>;
+
+/// An encrypted, length-framed wrapper around any byte stream.
 ///
 /// Both sides exchange ephemeral X25519 public keys, derive a shared
 /// AES-256-GCM session key (SHA-256 of the DH secret), and then exchange
@@ -17,7 +24,7 @@ const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 /// Nonces are never reused: each direction has its own prefix byte and a
 /// monotonically increasing counter.
 pub struct SecureStream {
-    stream: TcpStream,
+    stream: DynStream,
     cipher: Aes256Gcm,
     send_prefix: u8,
     recv_prefix: u8,
@@ -28,7 +35,7 @@ pub struct SecureStream {
 
 impl SecureStream {
     /// Initiator (sender) side of the handshake.
-    pub async fn connect(mut stream: TcpStream) -> Result<Self, String> {
+    pub async fn connect(mut stream: DynStream) -> Result<Self, String> {
         let secret = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
         let public = PublicKey::from(&secret);
         stream
@@ -46,7 +53,7 @@ impl SecureStream {
     }
 
     /// Responder (receiver) side of the handshake.
-    pub async fn accept(mut stream: TcpStream) -> Result<Self, String> {
+    pub async fn accept(mut stream: DynStream) -> Result<Self, String> {
         let mut peer_bytes = [0u8; 32];
         stream
             .read_exact(&mut peer_bytes)
@@ -64,7 +71,7 @@ impl SecureStream {
     }
 
     fn new(
-        stream: TcpStream,
+        stream: DynStream,
         secret: EphemeralSecret,
         peer: PublicKey,
         send_prefix: u8,
@@ -99,7 +106,7 @@ impl SecureStream {
     /// Split into independent read/write halves so a long-lived channel can
     /// send and receive concurrently. Each half keeps its own nonce counter.
     pub fn into_split(self) -> (SecureReader, SecureWriter) {
-        let (read_half, write_half) = self.stream.into_split();
+        let (read_half, write_half) = tokio::io::split(self.stream);
         (
             SecureReader {
                 stream: read_half,
@@ -172,7 +179,7 @@ impl SecureStream {
 
 /// Receiving half of a split SecureStream.
 pub struct SecureReader {
-    stream: tokio::net::tcp::OwnedReadHalf,
+    stream: tokio::io::ReadHalf<DynStream>,
     cipher: Aes256Gcm,
     prefix: u8,
     counter: u64,
@@ -207,7 +214,7 @@ impl SecureReader {
 
 /// Sending half of a split SecureStream.
 pub struct SecureWriter {
-    stream: tokio::net::tcp::OwnedWriteHalf,
+    stream: tokio::io::WriteHalf<DynStream>,
     cipher: Aes256Gcm,
     prefix: u8,
     counter: u64,

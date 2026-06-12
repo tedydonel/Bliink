@@ -42,7 +42,8 @@ No cloud. No accounts. No size limits. Devices find each other automatically and
 | 🔔 **Native notifications** | Toasts for incoming requests and finished transfers |
 | 💬 **Built-in chat** | WhatsApp-style messaging with attachments, voice notes, replies, read receipts and typing indicators — all over the same encryption |
 | 📞 **Audio calls** | Call any device on your network — WebRTC, no servers involved |
-| 🌍 **Remote devices** | Add devices by address — works across the internet through a VPN like Tailscale |
+| 🌍 **Works over the internet** | Add a device by its **Bliink ID** — direct P2P with NAT hole punching, encrypted relay fallback, zero setup |
+| 🌐 **Web Access** | Share with devices that don't have the app — browsers get a code-protected chat & file page |
 
 ## 📸 Screenshots
 
@@ -67,7 +68,7 @@ Grab an installer from the **[releases page](https://github.com/tedydonel/Bliink
 
 ### Connect over the internet
 
-Bliink discovers devices on your LAN automatically. For devices elsewhere, install a mesh VPN like [Tailscale](https://tailscale.com) on both machines, then use **Devices → Add Device** with the other machine's Tailscale IP and the port it shows under **Settings → Remote Access**. Everything — transfers, chat, calls — works over it.
+Bliink discovers devices on your LAN automatically. For devices elsewhere, open **Devices → Add Device → Over the internet** and paste the other device's **Bliink ID** (shown under **Settings → Remote Access**). Connections punch through NATs directly when possible and fall back to an encrypted relay ([iroh](https://iroh.computer)) otherwise — transfers, chat, and calls all work, end-to-end encrypted either way. Prefer your own network path? The **IP address / VPN** mode works with [Tailscale](https://tailscale.com) IPs or port forwarding.
 
 ### Prerequisites (building from source)
 
@@ -140,7 +141,8 @@ The wire protocol is versioned by release — both devices should run the same v
 - [x] 💬 Built-in chat (text, attachments, voice notes, receipts, typing)
 - [x] 📞 Audio calls over the LAN
 - [x] 🌍 Remote devices by address (VPN / port-forward friendly)
-- [ ] 🌐 Web access — share with devices that don't have the app, from your browser
+- [x] 🌐 Web access — share with devices that don't have the app, from your browser
+- [x] 🛰️ True internet P2P — connect by Bliink ID with hole punching + relay fallback
 - [ ] 🔗 PIN-bound device pairing
 - [ ] 📡 mDNS discovery
 
