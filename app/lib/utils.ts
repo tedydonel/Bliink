@@ -50,3 +50,15 @@ export function getFileIcon(fileType: string): string {
 export function cn(...classes: (string | false | null | undefined)[]): string {
   return classes.filter(Boolean).join(" ");
 }
+
+/**
+ * Short, human-friendly form of a Bliink ID (iroh NodeId) for display:
+ * `BLNK-XXXXXXXXXXX`. The full ID is still what's copied/used to connect —
+ * a cryptographic node identity can't be shortened without a lookup service —
+ * so always pair this with copy-the-full-value affordances.
+ */
+export function formatBliinkId(nodeId?: string | null): string {
+  if (!nodeId) return "";
+  const core = nodeId.replace(/[^a-z0-9]/gi, "").slice(0, 11).toUpperCase();
+  return `BLNK-${core}`;
+}

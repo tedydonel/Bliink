@@ -1,13 +1,13 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
-import { Inbox, Upload, X, Monitor, CheckCircle2, AlertCircle, File, Folder } from "lucide-react";
+import { useState, useCallback, useMemo, useEffect } from "react";
+import { Inbox, Upload, X, Monitor, CheckCircle2, AlertCircle, File, Folder, ArrowUp, ArrowDown } from "lucide-react";
 import { useAppStore, type TransferItem } from "@/app/lib/store";
 import TransferItemCard from "@/app/components/TransferItem";
 import TransferGroupCard from "@/app/components/TransferGroup";
 import FileThumb from "@/app/components/FileThumb";
 import FileDropZone, { type SelectedFile } from "@/app/components/FileDropZone";
-import { formatBytes } from "@/app/lib/utils";
+import { formatBytes, formatRelativeTime } from "@/app/lib/utils";
 import { cn } from "@/app/lib/utils";
 import * as api from "@/app/lib/tauri-api";
 
@@ -32,12 +32,22 @@ export default function TransferPage() {
     devices,
     selectedDeviceIds,
     toggleDeviceSelection,
+    history,
+    setHistory,
   } = useAppStore();
 
   const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([]);
   const [sendError, setSendError] = useState<string | null>(null);
 
   const onlineDevices = devices.filter((d) => d.status !== "offline");
+
+  // Recent transfers (history folds into this page under the new IA)
+  useEffect(() => {
+    (async () => {
+      const h = await api.getHistory(50, 0);
+      if (h.length) setHistory(h);
+    })();
+  }, [setHistory]);
 
   // Cluster batch members under one collapsible entry
   const entries = useMemo(() => {
@@ -181,9 +191,9 @@ export default function TransferPage() {
       {/* Header */}
       <div className="flex items-center justify-between px-8 pt-7 pb-5 shrink-0">
         <div>
-          <h1 className="text-xl font-bold text-foreground tracking-tight">Transfer</h1>
+          <h1 className="text-xl font-bold text-foreground tracking-tight">Transfers</h1>
           <p className="text-[13px] text-muted mt-1">
-            Send and receive files securely across your devices
+            Send and receive files securely — everything stays encrypted in flight
           </p>
         </div>
         {selectedFiles.length > 0 && (
@@ -350,8 +360,48 @@ export default function TransferPage() {
           </div>
         )}
 
+        {/* Recent (history) */}
+        {history.length > 0 && (
+          <div className="animate-fade-in">
+            <h2 className="text-[11px] font-bold text-muted uppercase tracking-widest mb-3">
+              Recent
+            </h2>
+            <div className="flex flex-col">
+              {history.map((h) => (
+                <div
+                  key={h.id}
+                  className="flex items-center gap-3 px-1.5 py-2.5 border-b border-border text-[12.5px]"
+                >
+                  <span
+                    className={cn(
+                      "flex shrink-0",
+                      h.direction === "upload" ? "text-accent" : "text-muted"
+                    )}
+                  >
+                    {h.direction === "upload" ? <ArrowUp size={13} /> : <ArrowDown size={13} />}
+                  </span>
+                  <span className="font-medium truncate min-w-0">
+                    {h.batchName
+                      ? `${h.batchName}`
+                      : h.fileName}
+                  </span>
+                  <span className="text-muted text-[11.5px] shrink-0">
+                    {h.direction === "upload" ? "→" : "←"} {h.deviceName}
+                  </span>
+                  <span className="ml-auto font-mono text-[11px] text-muted-light shrink-0">
+                    {formatBytes(h.fileSize)}
+                  </span>
+                  <span className="font-mono text-[10.5px] text-muted w-[78px] text-right shrink-0">
+                    {formatRelativeTime(h.completedAt)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Empty state */}
-        {transfers.length === 0 && selectedFiles.length === 0 && (
+        {transfers.length === 0 && selectedFiles.length === 0 && history.length === 0 && (
           <div className="flex flex-col items-center justify-center py-12 text-center">
             <div className="flex items-center justify-center w-16 h-16 rounded-2xl bg-surface border border-border mb-4">
               <Inbox className="w-7 h-7 text-muted" />

@@ -1,12 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { MessageCircle, Monitor, Phone, Search } from "lucide-react";
+import { MessageCircle, Monitor, Phone, Search, Lock, Shield } from "lucide-react";
 import MessageBubble from "@/app/components/chat/MessageBubble";
 import ChatInput from "@/app/components/chat/ChatInput";
 import { useAppStore, type ChatMessage, type Conversation } from "@/app/lib/store";
 import { callManager } from "@/app/lib/call-manager";
-import { cn, formatRelativeTime } from "@/app/lib/utils";
+import { cn } from "@/app/lib/utils";
 import * as api from "@/app/lib/tauri-api";
 
 export default function ChatsPage() {
@@ -31,15 +31,6 @@ export default function ChatsPage() {
     [chatMessages, activeId]
   );
 
-  // Initial conversations load
-  useEffect(() => {
-    const load = async () => {
-      if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
-      setConversations(await api.getConversations());
-    };
-    load();
-  }, [setConversations]);
-
   // Open a conversation: load history + clear unread
   const openConversation = useCallback(
     async (deviceId: string) => {
@@ -52,14 +43,23 @@ export default function ChatsPage() {
     [setChatMessages]
   );
 
+  // Initial conversations load + honor ?peer=<id> deep-link (from Network view)
+  useEffect(() => {
+    const load = async () => {
+      if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
+      setConversations(await api.getConversations());
+      const peer = new URLSearchParams(window.location.search).get("peer");
+      if (peer) openConversation(peer);
+    };
+    load();
+  }, [setConversations, openConversation]);
+
   // Mark incoming messages read while this conversation is on screen
   const unreadInActive = activeId
     ? messages.filter((m) => m.direction === "in" && m.status === "unread").length
     : 0;
   useEffect(() => {
-    if (activeId && unreadInActive > 0) {
-      api.markConversationRead(activeId);
-    }
+    if (activeId && unreadInActive > 0) api.markConversationRead(activeId);
   }, [activeId, unreadInActive]);
 
   // Stick to the bottom as messages arrive
@@ -100,91 +100,75 @@ export default function ChatsPage() {
     [upsertChatMessage]
   );
 
+  const fmtTime = (ts?: number | null) =>
+    ts
+      ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : "";
+
   return (
-    <div className="flex h-full">
-      {/* Conversation list */}
-      <div className="flex flex-col w-[300px] shrink-0 border-r border-border">
-        <div className="px-5 pt-7 pb-3 shrink-0">
-          <h1 className="text-xl font-bold text-foreground tracking-tight">Chats</h1>
-          <div className="relative mt-3">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted" />
+    <div className="bk-view">
+      <div className="bk-msg-body" style={{ borderTop: "1px solid var(--stroke)" }}>
+        {/* Conversation list */}
+        <div className="bk-convo-list">
+          <div className="bk-input" style={{ height: 34, margin: "4px 4px 8px" }}>
+            <Search size={14} />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search chats..."
-              className="w-full h-9 pl-9 pr-3 rounded-lg bg-surface border border-border text-[12px] text-foreground placeholder:text-muted focus:outline-none focus:border-accent/40"
+              placeholder="Search chats…"
             />
           </div>
-        </div>
 
-        <div className="flex-1 overflow-y-auto px-2 pb-4">
+          <div className="bk-section-label" style={{ margin: "4px 4px 8px" }}>
+            Conversations
+          </div>
+
           {filteredConversations.map((conv) => (
             <button
               key={conv.deviceId}
+              className={cn("bk-convo", activeId === conv.deviceId && "active")}
               onClick={() => openConversation(conv.deviceId)}
-              className={cn(
-                "flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-left transition-colors",
-                activeId === conv.deviceId
-                  ? "bg-accent/10 border border-accent/15"
-                  : "hover:bg-surface-hover border border-transparent"
-              )}
             >
-              <div className="relative shrink-0">
-                <div className="flex items-center justify-center w-10 h-10 rounded-full bg-gradient-to-br from-accent/20 to-sky/20 border border-accent/20">
-                  <Monitor className="w-4 h-4 text-accent" />
-                </div>
-                {conv.online && (
-                  <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-success border-2 border-background" />
-                )}
+              <div className="bk-convo-avatar">
+                <Monitor size={16} />
+                {conv.online && <span className="bk-online-dot" />}
               </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[13px] font-semibold text-foreground truncate">
-                    {conv.deviceName}
-                  </span>
-                  {conv.lastMessageAt && (
-                    <span className="text-[10px] text-muted shrink-0">
-                      {formatRelativeTime(conv.lastMessageAt)}
-                    </span>
-                  )}
+              <div className="bk-convo-meta">
+                <div className="bk-convo-name">
+                  {conv.deviceName}
+                  <time>{fmtTime(conv.lastMessageAt)}</time>
                 </div>
-                <div className="flex items-center justify-between gap-2 mt-0.5">
-                  <span className="text-[11px] text-muted truncate">
-                    {typingPeers[conv.deviceId] ? (
-                      <span className="text-accent">typing…</span>
-                    ) : (
-                      conv.lastPreview ?? ""
-                    )}
-                  </span>
-                  {conv.unreadCount > 0 && (
-                    <span className="flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent text-background text-[10px] font-bold shrink-0">
-                      {conv.unreadCount}
-                    </span>
+                <div className={cn("bk-convo-last", conv.unreadCount > 0 && "unread")}>
+                  {typingPeers[conv.deviceId] ? (
+                    <span style={{ color: "var(--accent)" }}>typing…</span>
+                  ) : (
+                    conv.lastPreview ?? ""
                   )}
                 </div>
               </div>
+              {conv.unreadCount > 0 && (
+                <span className="bk-nav-badge">{conv.unreadCount}</span>
+              )}
             </button>
           ))}
 
           {newChatDevices.length > 0 && (
             <>
-              <p className="px-3 pt-4 pb-2 text-[10px] font-bold text-muted uppercase tracking-widest">
+              <div className="bk-section-label" style={{ margin: "12px 4px 8px" }}>
                 Start a chat
-              </p>
+              </div>
               {newChatDevices.map((device) => (
                 <button
                   key={device.id}
+                  className="bk-convo"
                   onClick={() => openConversation(device.id)}
-                  className="flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-left hover:bg-surface-hover transition-colors"
                 >
-                  <div className="flex items-center justify-center w-10 h-10 rounded-full bg-surface-active border border-border shrink-0">
-                    <Monitor className="w-4 h-4 text-muted-light" />
+                  <div className="bk-convo-avatar">
+                    <Monitor size={16} />
                   </div>
-                  <div className="min-w-0">
-                    <p className="text-[13px] font-medium text-foreground truncate">
-                      {device.name}
-                    </p>
-                    <p className="text-[11px] text-muted">{device.ip}</p>
+                  <div className="bk-convo-meta">
+                    <div className="bk-convo-name">{device.name}</div>
+                    <div className="bk-convo-last">{device.ip || "internet peer"}</div>
                   </div>
                 </button>
               ))}
@@ -192,68 +176,74 @@ export default function ChatsPage() {
           )}
 
           {conversations.length === 0 && newChatDevices.length === 0 && (
-            <div className="px-3 py-10 text-center">
-              <MessageCircle className="w-8 h-8 text-muted mx-auto mb-3" />
-              <p className="text-[12px] text-muted">
-                No chats yet. Devices running Bliink will appear here.
-              </p>
+            <div className="bk-empty" style={{ padding: "30px 16px" }}>
+              <MessageCircle size={28} />
+              <p>No chats yet. Devices running Bliink will appear here.</p>
             </div>
           )}
         </div>
-      </div>
 
-      {/* Thread */}
-      {activeId ? (
-        <div className="flex flex-col flex-1 min-w-0">
-          {/* Header */}
-          <div className="flex items-center gap-3 px-5 py-3.5 border-b border-border bg-surface/40 shrink-0">
-            <div className="relative">
-              <div className="flex items-center justify-center w-9 h-9 rounded-full bg-gradient-to-br from-accent/20 to-sky/20 border border-accent/20">
-                <Monitor className="w-4 h-4 text-accent" />
+        {/* Thread */}
+        {activeId ? (
+          <div className="bk-chat">
+            <div className="bk-chat-head">
+              <div className="bk-convo-avatar">
+                <Monitor size={16} />
+                {activeOnline && <span className="bk-online-dot" />}
               </div>
-              {activeOnline && (
-                <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-success border-2 border-background" />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600 }}>{activeName}</div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: typingPeers[activeId] ? "var(--accent)" : "var(--faint)",
+                    fontFamily: "var(--font-mono)",
+                  }}
+                >
+                  {typingPeers[activeId]
+                    ? "typing…"
+                    : activeOnline
+                    ? "online · direct link"
+                    : "offline · messages queue"}
+                </div>
+              </div>
+              {!activeId.startsWith("web-") && (
+                <button
+                  className="bk-iconbtn"
+                  onClick={() => callManager.startCall(activeId, activeName)}
+                  disabled={!activeOnline || callState.status !== "idle"}
+                  style={{
+                    color:
+                      activeOnline && callState.status === "idle"
+                        ? "var(--accent)"
+                        : "var(--faint)",
+                    cursor:
+                      activeOnline && callState.status === "idle"
+                        ? "pointer"
+                        : "not-allowed",
+                  }}
+                  title={
+                    !activeOnline
+                      ? "Device is offline"
+                      : callState.status !== "idle"
+                      ? "Already in a call"
+                      : "Start audio call"
+                  }
+                  aria-label="Start audio call"
+                >
+                  <Phone size={16} />
+                </button>
               )}
+              <span className="bk-chip lock">
+                <Lock size={10} /> end-to-end
+              </span>
             </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-[14px] font-bold text-foreground truncate">{activeName}</p>
-              <p className="text-[11px] text-muted">
-                {typingPeers[activeId] ? (
-                  <span className="text-accent">typing…</span>
-                ) : activeOnline ? (
-                  "Online"
-                ) : (
-                  "Offline"
-                )}
-              </p>
-            </div>
-            {!activeId.startsWith("web-") && (
-            <button
-              onClick={() => callManager.startCall(activeId, activeName)}
-              disabled={!activeOnline || callState.status !== "idle"}
-              className={cn(
-                "flex items-center justify-center w-9 h-9 rounded-lg transition-colors shrink-0",
-                activeOnline && callState.status === "idle"
-                  ? "text-accent hover:bg-accent/10 border border-accent/20"
-                  : "text-muted/40 border border-border cursor-not-allowed"
-              )}
-              aria-label="Start audio call"
-              title={
-                !activeOnline
-                  ? "Device is offline"
-                  : callState.status !== "idle"
-                  ? "Already in a call"
-                  : "Start audio call"
-              }
-            >
-              <Phone className="w-4 h-4" />
-            </button>
-            )}
-          </div>
 
-          {/* Messages */}
-          <div ref={threadRef} className="flex-1 overflow-y-auto px-5 py-4">
-            <div className="flex flex-col gap-1.5">
+            <div className="bk-chat-scroll" ref={threadRef}>
+              <div className="bk-e2e-banner">
+                <Shield size={12} /> Messages with {activeName} are end-to-end
+                encrypted. No server ever sees them.
+              </div>
               {messages.map((message, i) => {
                 const prev = messages[i - 1];
                 const showDay =
@@ -263,10 +253,8 @@ export default function ChatsPage() {
                 return (
                   <div key={message.id}>
                     {showDay && (
-                      <div className="flex justify-center my-3">
-                        <span className="px-3 py-1 rounded-full bg-surface border border-border text-[10px] text-muted">
-                          {formatDay(message.createdAt)}
-                        </span>
+                      <div className="bk-e2e-banner" style={{ background: "transparent", border: "none" }}>
+                        {formatDay(message.createdAt)}
                       </div>
                     )}
                     <MessageBubble
@@ -283,35 +271,31 @@ export default function ChatsPage() {
               })}
 
               {messages.length === 0 && (
-                <div className="flex flex-col items-center justify-center py-20 text-center">
-                  <MessageCircle className="w-8 h-8 text-muted mb-3" />
-                  <p className="text-[13px] text-muted">
-                    Say hi — messages are encrypted end to end.
-                  </p>
+                <div className="bk-empty" style={{ paddingTop: 60 }}>
+                  <MessageCircle size={28} />
+                  <p>Say hi — messages are encrypted end to end.</p>
                 </div>
               )}
             </div>
-          </div>
 
-          <ChatInput
-            deviceId={activeId}
-            replyingTo={replyingTo}
-            onCancelReply={() => setReplyingTo(null)}
-            onSent={handleSent}
-          />
-        </div>
-      ) : (
-        <div className="flex flex-col items-center justify-center flex-1 text-center px-8">
-          <div className="flex items-center justify-center w-16 h-16 rounded-2xl bg-surface border border-border mb-4">
-            <MessageCircle className="w-7 h-7 text-muted" />
+            <ChatInput
+              deviceId={activeId}
+              replyingTo={replyingTo}
+              onCancelReply={() => setReplyingTo(null)}
+              onSent={handleSent}
+            />
           </div>
-          <p className="text-[15px] font-semibold text-foreground">Your messages</p>
-          <p className="text-[13px] text-muted mt-1.5 max-w-[300px]">
-            Pick a conversation or start a new one with a device on your network.
-            Messages travel encrypted, directly between devices.
-          </p>
-        </div>
-      )}
+        ) : (
+          <div className="bk-empty" style={{ flex: 1 }}>
+            <MessageCircle size={34} />
+            <h3>Your messages</h3>
+            <p>
+              Pick a conversation or start a new one with a device on your network.
+              Messages travel encrypted, directly between devices.
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

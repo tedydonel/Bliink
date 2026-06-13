@@ -156,11 +156,24 @@ export interface AppSettings {
   deviceName: string;
 }
 
+// ─── UI Types ───────────────────────────────────────────────────
+// Which network the Network view is showing: the local LAN (radar) or
+// internet peers reached over P2P (world map). Drives the titlebar toggle
+// and the teal → blue accent shift.
+export type NetworkScope = "lan" | "internet";
+
 // ─── Store ──────────────────────────────────────────────────────
 interface AppState {
   // Connection
   isConnected: boolean;
   setIsConnected: (connected: boolean) => void;
+
+  // UI shell
+  scope: NetworkScope;
+  setScope: (scope: NetworkScope) => void;
+  sidebarCollapsed: boolean;
+  toggleSidebar: () => void;
+  setSidebarCollapsed: (collapsed: boolean) => void;
 
   // Devices
   devices: Device[];
@@ -213,6 +226,13 @@ export const useAppStore = create<AppState>((set) => ({
   // ── Connection ──
   isConnected: false,
   setIsConnected: (isConnected) => set({ isConnected }),
+
+  // ── UI shell ──
+  scope: "lan",
+  setScope: (scope) => set({ scope }),
+  sidebarCollapsed: false,
+  toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+  setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
 
   // ── Devices ──
   devices: [],

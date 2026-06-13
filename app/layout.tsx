@@ -1,8 +1,14 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import {
+  Geist,
+  Geist_Mono,
+  Space_Grotesk,
+  Instrument_Sans,
+  JetBrains_Mono,
+} from "next/font/google";
 import "./globals.css";
-import TitleBar from "./components/TitleBar";
-import Sidebar from "./components/Sidebar";
+import "./bliink-ui.css";
+import AppShell from "./components/AppShell";
 import TransferListener from "./components/TransferListener";
 import ChatListener from "./components/ChatListener";
 import IncomingRequestDialog from "./components/IncomingRequestDialog";
@@ -18,6 +24,25 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// Design-system type families (self-hosted at build time → work offline).
+const spaceGrotesk = Space_Grotesk({
+  variable: "--font-space-grotesk",
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+});
+
+const instrumentSans = Instrument_Sans({
+  variable: "--font-instrument-sans",
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  variable: "--font-jetbrains-mono",
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+});
+
 export const metadata: Metadata = {
   title: "Bliink",
   description: "Super-fast, secure file transfers",
@@ -31,17 +56,14 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased h-screen flex flex-col overflow-hidden`}
+        className={`${geistSans.variable} ${geistMono.variable} ${spaceGrotesk.variable} ${instrumentSans.variable} ${jetbrainsMono.variable} antialiased h-screen overflow-hidden`}
       >
+        {/* Global listeners + overlays live outside the window chrome */}
         <TransferListener />
         <ChatListener />
         <IncomingRequestDialog />
         <CallOverlay />
-        <TitleBar />
-        <div className="flex flex-1 overflow-hidden">
-          <Sidebar />
-          <main className="flex-1 overflow-auto">{children}</main>
-        </div>
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

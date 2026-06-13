@@ -4,132 +4,117 @@ import { useEffect, useState, useCallback } from "react";
 import Image from "next/image";
 import { useAppStore } from "@/app/lib/store";
 import { cn } from "@/app/lib/utils";
+import { WifiIcon, GlobeIcon } from "./Icons";
 
 export default function TitleBar() {
-  const [isMaximized, setIsMaximized] = useState(false);
   const [appWindow, setAppWindow] = useState<any>(null);
-  const isConnected = useAppStore((s) => s.isConnected);
+  const [isMaximized, setIsMaximized] = useState(false);
+  const scope = useAppStore((s) => s.scope);
+  const setScope = useAppStore((s) => s.setScope);
 
   useEffect(() => {
-    // Dynamically import Tauri API to avoid issues in non-Tauri environments (e.g., browser)
+    let unlisten: (() => void) | undefined;
     const initTauri = async () => {
       try {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         const win = getCurrentWindow();
         setAppWindow(win);
-        
-        // Check initial state
-        const maximized = await win.isMaximized();
-        setIsMaximized(maximized);
-        
-        // Listen for resize events to update the maximize icon state
-        const unlisten = await win.onResized(async () => {
-             const maximized = await win.isMaximized();
-             setIsMaximized(maximized);
+        setIsMaximized(await win.isMaximized());
+        // Keep the maximize/restore icon in sync with the real window state.
+        unlisten = await win.onResized(async () => {
+          setIsMaximized(await win.isMaximized());
         });
-
-        return () => unlisten();
       } catch (e) {
-        console.warn("Tauri API not detected or failed to load. You might be running in a browser.", e);
+        console.warn("Tauri window API unavailable (running in a browser?)", e);
       }
     };
-
     if (typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__) {
       initTauri();
     }
+    return () => unlisten?.();
   }, []);
 
-  const handleMinimize = useCallback(() => {
-    appWindow?.minimize();
-  }, [appWindow]);
-
+  const handleMinimize = useCallback(() => appWindow?.minimize(), [appWindow]);
   const handleToggleMaximize = useCallback(async () => {
     if (!appWindow) return;
     await appWindow.toggleMaximize();
-    const maximized = await appWindow.isMaximized();
-    setIsMaximized(maximized);
+    setIsMaximized(await appWindow.isMaximized());
   }, [appWindow]);
-
-  const handleClose = useCallback(() => {
-    appWindow?.close();
-  }, [appWindow]);
-
-  if (!appWindow) {
-    return null;
-  }
+  const handleClose = useCallback(() => appWindow?.close(), [appWindow]);
 
   return (
-    <div
-      data-tauri-drag-region
-      className="flex items-center justify-between h-10 bg-sidebar border-b border-border select-none shrink-0"
-    >
-      {/* App Icon & Title */}
-      <div
-        data-tauri-drag-region
-        className="flex items-center gap-3 pl-4 pointer-events-none"
-      >
-        <div className="relative w-5 h-5">
-            <Image 
-                src="/Logo.ico" 
-                alt="Bliink" 
-                fill
-                className="object-contain"
-            />
+    <div className="bk-titlebar" data-tauri-drag-region>
+      <Image
+        className="bk-titlebar-logo"
+        src="/Logo.ico"
+        alt="Bliink"
+        width={18}
+        height={18}
+      />
+      <div className="bk-wordmark">
+        bl
+        <span className="ii">
+          <i>i</i>
+          <i>i</i>
+        </span>
+        nk
+      </div>
+
+      <div className="bk-titlebar-drag" data-tauri-drag-region />
+
+      <div className="bk-seg bk-titlebar-seg">
+        <button
+          className={cn("bk-seg-btn", scope === "lan" && "active")}
+          onClick={() => setScope("lan")}
+        >
+          <WifiIcon size={13} /> LAN
+        </button>
+        <button
+          className={cn("bk-seg-btn", scope === "internet" && "active")}
+          onClick={() => setScope("internet")}
+        >
+          <GlobeIcon size={13} /> Internet
+        </button>
+      </div>
+
+      {appWindow && (
+        <div className="bk-wincontrols">
+          <button
+            className="bk-winbtn"
+            onClick={handleMinimize}
+            aria-label="Minimize"
+          >
+            <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" strokeWidth="1.1">
+              <path d="M0.5 5.5h10" />
+            </svg>
+          </button>
+          <button
+            className="bk-winbtn"
+            onClick={handleToggleMaximize}
+            aria-label={isMaximized ? "Restore" : "Maximize"}
+          >
+            {isMaximized ? (
+              <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" strokeWidth="1.1">
+                <rect x="0.5" y="2.5" width="8" height="8" rx="1" />
+                <path d="M2.8 2.5V1.2A.7.7 0 0 1 3.5.5h6.3a.7.7 0 0 1 .7.7v6.3a.7.7 0 0 1-.7.7H8.5" />
+              </svg>
+            ) : (
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1">
+                <rect x="0.5" y="0.5" width="9" height="9" rx="1.5" />
+              </svg>
+            )}
+          </button>
+          <button
+            className="bk-winbtn close"
+            onClick={handleClose}
+            aria-label="Close"
+          >
+            <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" strokeWidth="1.1">
+              <path d="m0.8 0.8 9.4 9.4M10.2 0.8 0.8 10.2" />
+            </svg>
+          </button>
         </div>
-        <span className="text-xs font-bold text-foreground tracking-wide">Bliink</span>
-      </div>
-
-      {/* Window controls & Status */}
-      <div className="flex items-center h-full">
-        {/* Connection Status Indicator */}
-        <div
-          className={cn(
-            "w-2.5 h-2.5 rounded-full shadow-[0_0_8px_currentColor] mr-4",
-            isConnected ? "bg-success text-success" : "bg-danger text-danger"
-          )}
-          title={isConnected ? "Connected" : "Offline"}
-        />
-
-        {/* Minimize */}
-        <button
-          onClick={handleMinimize}
-          className="inline-flex items-center justify-center w-12 h-full hover:bg-surface-hover transition-colors text-muted hover:text-foreground"
-          aria-label="Minimize"
-        >
-          <svg width="10" height="1" viewBox="0 0 10 1" className="fill-current">
-            <rect width="10" height="1" />
-          </svg>
-        </button>
-
-        {/* Maximize / Restore */}
-        <button
-          onClick={handleToggleMaximize}
-          className="inline-flex items-center justify-center w-12 h-full hover:bg-surface-hover transition-colors text-muted hover:text-foreground"
-          aria-label={isMaximized ? "Restore" : "Maximize"}
-        >
-          {isMaximized ? (
-            <svg width="10" height="10" viewBox="0 0 10 10" className="fill-none stroke-current" strokeWidth="1">
-              <path d="M3 0.5h6.5v6.5" />
-              <rect x="0.5" y="2.5" width="7" height="7" />
-            </svg>
-          ) : (
-            <svg width="10" height="10" viewBox="0 0 10 10" className="fill-none stroke-current" strokeWidth="1">
-              <rect x="0.5" y="0.5" width="9" height="9" />
-            </svg>
-          )}
-        </button>
-
-        {/* Close */}
-        <button
-          onClick={handleClose}
-          className="inline-flex items-center justify-center w-12 h-full hover:bg-danger hover:text-white transition-colors text-muted group"
-          aria-label="Close"
-        >
-          <svg width="10" height="10" viewBox="0 0 10 10" className="fill-none stroke-current" strokeWidth="1.2">
-            <path d="M1 1l8 8M9 1l-8 8" />
-          </svg>
-        </button>
-      </div>
+      )}
     </div>
   );
 }

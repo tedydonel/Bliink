@@ -1,49 +1,52 @@
 @import "tailwindcss";
 
+/* Tailwind theme tokens are aligned to the "midnight network" design system
+   (see bliink-ui.css). Keeping these in sync means existing Tailwind-styled
+   pages adopt the new palette + type without per-component rewrites. */
 @theme inline {
-  --color-background: #060810;
-  --color-foreground: #edf0f7;
+  --color-background: #06080c;
+  --color-foreground: #e9eef4;
 
-  --color-surface: #0c0f18;
-  --color-surface-hover: #131722;
-  --color-surface-active: #1a1f2e;
+  --color-surface: #10151d;
+  --color-surface-hover: #161d27;
+  --color-surface-active: #1a2230;
 
-  --color-sidebar: #080a12;
-  --color-sidebar-hover: #111524;
+  --color-sidebar: #0b0f15;
+  --color-sidebar-hover: #131a26;
 
-  --color-border: #161b2a;
-  --color-border-bright: #232940;
+  --color-border: #1a212e;
+  --color-border-bright: #283044;
 
-  --color-accent: #38bdf8;
-  --color-accent-dim: rgba(56, 189, 248, 0.10);
-  --color-accent-hover: #7dd3fc;
-  --color-accent-glow: rgba(56, 189, 248, 0.25);
+  --color-accent: #3fe0bd;
+  --color-accent-dim: rgba(63, 224, 189, 0.10);
+  --color-accent-hover: #5fe9cb;
+  --color-accent-glow: rgba(63, 224, 189, 0.25);
 
-  --color-sky: #38bdf8;
-  --color-sky-dim: rgba(56, 189, 248, 0.10);
+  /* Sky stays blue — it doubles as the "internet" accent in a few places */
+  --color-sky: #53c0ff;
+  --color-sky-dim: rgba(83, 192, 255, 0.10);
   --color-sky-hover: #7dd3fc;
-  --color-sky-glow: rgba(56, 189, 248, 0.25);
+  --color-sky-glow: rgba(83, 192, 255, 0.25);
 
-  --color-muted: #4a5068;
-  --color-muted-light: #8890a4;
+  --color-muted: #5c6878;
+  --color-muted-light: #94a0ae;
 
-  --color-danger: #ff3b5c;
-  --color-danger-dim: rgba(255, 59, 92, 0.12);
+  --color-danger: #ff6b7a;
+  --color-danger-dim: rgba(255, 107, 122, 0.12);
 
-  --color-success: #00e676;
-  --color-success-dim: rgba(0, 230, 118, 0.12);
+  --color-success: #3fe0bd;
+  --color-success-dim: rgba(63, 224, 189, 0.12);
 
-  --color-warning: #ffab00;
-  --color-warning-dim: rgba(255, 171, 0, 0.12);
+  --color-warning: #ffc861;
+  --color-warning-dim: rgba(255, 200, 97, 0.12);
 
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-instrument-sans), var(--font-geist-sans);
+  --font-mono: var(--font-jetbrains-mono), var(--font-geist-mono);
 }
 
-* {
-  scrollbar-width: thin;
-  scrollbar-color: #161b2a transparent;
-}
+/* NOTE: no `scrollbar-width`/`scrollbar-color` here on purpose. Setting either
+   makes Chromium ignore the custom `::-webkit-scrollbar` styling in bliink-ui.css,
+   which is what made the scrollbar look native. */
 
 body {
   background: var(--color-background);

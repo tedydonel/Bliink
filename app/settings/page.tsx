@@ -2,20 +2,52 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import {
-  User,
-  FolderOpen,
-  Shield,
-  Bell,
-  Layers,
   Monitor,
   Cpu,
   Globe,
   Copy,
   Check,
+  Power,
+  Users,
+  ShieldAlert,
+  Loader2,
 } from "lucide-react";
 import { useAppStore, type AppSettings } from "@/app/lib/store";
-import { cn } from "@/app/lib/utils";
+import { formatBliinkId } from "@/app/lib/utils";
 import * as api from "@/app/lib/tauri-api";
+
+// Toggle styled to match the design system.
+function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      onClick={() => onChange(!on)}
+      style={{
+        width: 38,
+        height: 22,
+        borderRadius: 99,
+        border: "1px solid " + (on ? "transparent" : "var(--stroke2)"),
+        background: on ? "var(--accent)" : "rgba(255,255,255,0.07)",
+        position: "relative",
+        cursor: "pointer",
+        transition: "background 0.18s",
+        flexShrink: 0,
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          top: 2.5,
+          left: on ? 18 : 3,
+          width: 15,
+          height: 15,
+          borderRadius: "50%",
+          background: on ? "var(--accent-ink)" : "var(--muted)",
+          transition: "left 0.18s cubic-bezier(0.3,1.2,0.4,1)",
+        }}
+      />
+    </button>
+  );
+}
 
 export default function SettingsPage() {
   const { settings, updateSettings } = useAppStore();
@@ -23,51 +55,39 @@ export default function SettingsPage() {
   const [networkInfo, setNetworkInfo] = useState<api.NetworkInfo | null>(null);
   const [appVersion, setAppVersion] = useState<string>("");
   const [copied, setCopied] = useState(false);
+  const [copiedId, setCopiedId] = useState(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Web Access state
+  const [web, setWeb] = useState<api.WebServerStatus | null>(null);
+  const [webBusy, setWebBusy] = useState(false);
+  const [webError, setWebError] = useState<string | null>(null);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+  const webPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     const load = async () => {
       const s = await api.getSettings();
       if (s) updateSettings(s);
-
-      const info = await api.getDeviceInfo();
-      setDeviceInfo(info);
-
+      setDeviceInfo(await api.getDeviceInfo());
       setNetworkInfo(await api.getNetworkInfo());
       setAppVersion(await api.getAppVersion());
     };
     load();
   }, [updateSettings]);
 
-  const handleCopyAddress = useCallback(async () => {
-    if (!networkInfo) return;
-    try {
-      await navigator.clipboard.writeText(`${networkInfo.ip}:${networkInfo.chatPort}`);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (e) {
-      console.error("Clipboard error:", e);
-    }
-  }, [networkInfo]);
-
-  const [copiedId, setCopiedId] = useState(false);
-  const handleCopyBliinkId = useCallback(async () => {
-    if (!networkInfo?.bliinkId) return;
-    try {
-      await navigator.clipboard.writeText(networkInfo.bliinkId);
-      setCopiedId(true);
-      setTimeout(() => setCopiedId(false), 2000);
-    } catch (e) {
-      console.error("Clipboard error:", e);
-    }
-  }, [networkInfo]);
-
-  const persistSettings = useCallback((merged: AppSettings) => {
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(async () => {
-      await api.updateSettings(merged);
-    }, 400);
+  // Poll web-server status
+  const refreshWeb = useCallback(async () => {
+    const s = await api.getWebServerStatus();
+    if (s) setWeb(s);
   }, []);
+  useEffect(() => {
+    refreshWeb();
+    webPollRef.current = setInterval(refreshWeb, 3000);
+    return () => {
+      if (webPollRef.current) clearInterval(webPollRef.current);
+    };
+  }, [refreshWeb]);
 
   useEffect(() => {
     return () => {
@@ -75,305 +95,304 @@ export default function SettingsPage() {
     };
   }, []);
 
+  const copy = async (text: string, set: (b: boolean) => void) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      set(true);
+      setTimeout(() => set(false), 2000);
+    } catch (e) {
+      console.error("Clipboard error:", e);
+    }
+  };
+
+  const persistSettings = useCallback((merged: AppSettings) => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => api.updateSettings(merged), 400);
+  }, []);
+
   const handleSettingChange = useCallback(
     (updates: Partial<AppSettings>) => {
       updateSettings(updates);
-      const merged = { ...settings, ...updates };
-      persistSettings(merged);
+      persistSettings({ ...settings, ...updates });
     },
     [settings, updateSettings, persistSettings]
   );
 
   const handleChangeDownloadPath = useCallback(async () => {
-    if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__)
-      return;
+    if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const dir = await open({ directory: true, multiple: false });
-      if (typeof dir === "string") {
-        handleSettingChange({ downloadPath: dir });
-      }
+      if (typeof dir === "string") handleSettingChange({ downloadPath: dir });
     } catch (e) {
       console.error("Folder dialog error:", e);
     }
   }, [handleSettingChange]);
 
+  const handleWebToggle = useCallback(async () => {
+    setWebBusy(true);
+    setWebError(null);
+    try {
+      const s = web?.running ? await api.stopWebServer() : await api.startWebServer();
+      if (s) setWeb(s);
+    } catch (e: any) {
+      setWebError(String(e?.message ?? e));
+    }
+    setWebBusy(false);
+  }, [web?.running]);
+
+  const webRunning = web?.running ?? false;
+
   return (
-    <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between px-8 pt-7 pb-5 shrink-0">
+    <div className="bk-view">
+      <div className="bk-view-head">
         <div>
-          <h1 className="text-xl font-bold text-foreground tracking-tight">Profile & Settings</h1>
-          <p className="text-[13px] text-muted mt-1">
-            Manage your identity and preferences
-          </p>
+          <div className="bk-view-title">Settings</div>
+          <div className="bk-view-sub">Identity, transfers, encryption and remote access</div>
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto px-8 py-5 space-y-8">
-        {/* Profile Section */}
-        <section className="animate-fade-in">
-          <div className="flex items-start gap-6 p-6 rounded-2xl bg-gradient-to-br from-surface to-surface-active border border-border shadow-sm">
-            {/* Avatar */}
-            <div className="relative shrink-0">
-              <div className="w-20 h-20 rounded-full bg-gradient-to-br from-accent/20 to-sky/20 border-2 border-surface shadow-[0_0_0_4px_rgba(255,255,255,0.02)] flex items-center justify-center">
-                 <User className="w-8 h-8 text-accent" />
+      <div className="bk-scroll">
+        <div className="bk-settings-grid">
+          {/* This device */}
+          <div className="bk-card">
+            <h3>This device</h3>
+            <div className="desc">How you appear to others on the network.</div>
+            <div className="bk-field" style={{ borderTop: "none", paddingTop: 0 }}>
+              <div>
+                <div className="bk-field-label">Device name</div>
+                <div className="bk-field-sub">Shown on the radar of nearby peers</div>
               </div>
-              <div className="absolute bottom-0 right-0 w-6 h-6 rounded-full bg-surface border-2 border-surface flex items-center justify-center">
-                <div className="w-full h-full rounded-full bg-success border-2 border-surface" />
+              <div className="bk-input" style={{ width: 220 }}>
+                <input
+                  value={settings.deviceName}
+                  onChange={(e) => handleSettingChange({ deviceName: e.target.value })}
+                  style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}
+                />
               </div>
             </div>
-
-            {/* User Info & Edit */}
-            <div className="flex-1 min-w-0 pt-1">
-               <div className="mb-4">
-                 <label className="text-[11px] font-bold text-muted uppercase tracking-wider block mb-1.5">
-                   Display Name
-                 </label>
-                 <input
-                    type="text"
-                    value={settings.deviceName}
-                    onChange={(e) => handleSettingChange({ deviceName: e.target.value })}
-                    className="w-full max-w-md h-10 px-0 bg-transparent text-xl font-bold text-foreground focus:outline-none focus:border-b-2 focus:border-accent border-b border-transparent transition-all placeholder:text-muted/30"
-                    placeholder="Enter device name"
-                  />
-               </div>
-
-               <div className="flex items-center gap-4 text-[12px] text-muted font-medium">
-                  <div className="flex items-center gap-1.5">
-                    <Monitor className="w-3.5 h-3.5" />
-                    <span>{deviceInfo?.os || "Unknown OS"}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <Cpu className="w-3.5 h-3.5" />
-                    <span>{deviceInfo?.arch || "Unknown Arch"}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/10">
-                    <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-                    <span>Online</span>
-                  </div>
-               </div>
-            </div>
-          </div>
-        </section>
-
-        {/* Settings Sections */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Transfers */}
-            <section className="animate-fade-in space-y-3" style={{ animationDelay: "50ms" }}>
-              <h2 className="flex items-center gap-2 text-xs font-semibold text-muted uppercase tracking-wider">
-                <FolderOpen className="w-3.5 h-3.5" />
-                Transfers
-              </h2>
-              
-              <div className="flex flex-col gap-3">
-                <div className="p-4 rounded-xl bg-surface border border-border">
-                  <div className="flex items-center justify-between mb-2">
-                    <p className="text-sm font-medium text-foreground">Download Location</p>
-                    <button
-                      onClick={handleChangeDownloadPath}
-                      className="text-[11px] font-semibold text-accent hover:underline"
-                    >
-                      Change
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface-active/50 border border-border text-[12px] text-muted-light break-all">
-                     <FolderOpen className="w-3.5 h-3.5 shrink-0" />
-                     {settings.downloadPath || "Downloads folder"}
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between p-4 rounded-xl bg-surface border border-border">
-                  <div>
-                    <p className="text-sm font-medium text-foreground">Max Concurrent</p>
-                    <p className="text-xs text-muted mt-0.5">Parallel transfers</p>
-                  </div>
-                  <select
-                    value={settings.maxConcurrentTransfers}
-                    onChange={(e) => handleSettingChange({ maxConcurrentTransfers: Number(e.target.value) })}
-                    className="h-8 px-2 rounded-lg bg-surface-active border border-border text-sm text-foreground focus:outline-none focus:border-accent/40"
-                  >
-                    {[1, 2, 3, 5, 10].map((n) => (
-                      <option key={n} value={n}>{n}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="flex items-center justify-between p-4 rounded-xl bg-surface border border-border">
-                  <div>
-                    <p className="text-sm font-medium text-foreground">Chunk Size</p>
-                    <p className="text-xs text-muted mt-0.5">Data block size</p>
-                  </div>
-                  <select
-                    value={settings.chunkSize}
-                    onChange={(e) => handleSettingChange({ chunkSize: Number(e.target.value) })}
-                    className="h-8 px-2 rounded-lg bg-surface-active border border-border text-sm text-foreground focus:outline-none focus:border-accent/40"
-                  >
-                    <option value={256 * 1024}>256 KB</option>
-                    <option value={512 * 1024}>512 KB</option>
-                    <option value={1024 * 1024}>1 MB</option>
-                    <option value={4 * 1024 * 1024}>4 MB</option>
-                    <option value={8 * 1024 * 1024}>8 MB</option>
-                  </select>
-                </div>
+            <div className="bk-field">
+              <div>
+                <div className="bk-field-label">Platform</div>
+                <div className="bk-field-sub">Detected automatically</div>
               </div>
-            </section>
-
-            {/* Security & Notifications */}
-            <div className="space-y-6">
-                <section className="animate-fade-in space-y-3" style={{ animationDelay: "100ms" }}>
-                  <h2 className="flex items-center gap-2 text-xs font-semibold text-muted uppercase tracking-wider">
-                    <Shield className="w-3.5 h-3.5" />
-                    Security
-                  </h2>
-                  <div className="flex flex-col gap-3">
-                    <ToggleSetting
-                      title="Require Code Check"
-                      description="Must confirm codes match before accepting"
-                      enabled={settings.requirePin}
-                      onChange={(v) => handleSettingChange({ requirePin: v })}
-                    />
-                    <ToggleSetting
-                      title="Auto-accept Files"
-                      description="Receive without a confirmation prompt"
-                      enabled={settings.autoAcceptFromPaired}
-                      onChange={(v) => handleSettingChange({ autoAcceptFromPaired: v })}
-                    />
-                  </div>
-                </section>
-
-                <section className="animate-fade-in space-y-3" style={{ animationDelay: "150ms" }}>
-                  <h2 className="flex items-center gap-2 text-xs font-semibold text-muted uppercase tracking-wider">
-                    <Bell className="w-3.5 h-3.5" />
-                    Notifications
-                  </h2>
-                  <ToggleSetting
-                    title="Enable Notifications"
-                    description="System alerts for transfers"
-                    enabled={settings.showNotifications}
-                    onChange={(v) => handleSettingChange({ showNotifications: v })}
-                  />
-                </section>
+              <span className="v" style={{ display: "flex", alignItems: "center", gap: 12, fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--muted)" }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <Monitor size={13} /> {deviceInfo?.os ?? "—"}
+                </span>
+                <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <Cpu size={13} /> {deviceInfo?.arch ?? "—"}
+                </span>
+              </span>
             </div>
-        </div>
-
-        {/* Remote Access */}
-        <section className="animate-fade-in space-y-3" style={{ animationDelay: "175ms" }}>
-          <h2 className="flex items-center gap-2 text-xs font-semibold text-muted uppercase tracking-wider">
-            <Globe className="w-3.5 h-3.5" />
-            Remote Access
-          </h2>
-          <div className="p-4 rounded-xl bg-surface border border-border">
-            <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-foreground">Bliink ID</p>
-                <p className="text-xs text-muted mt-0.5">
-                  Share this to connect from anywhere over the internet — no setup needed
-                </p>
+            <div className="bk-field">
+              <div>
+                <div className="bk-field-label">Save received files to</div>
+                <div className="bk-field-sub">Folder batches keep their structure</div>
               </div>
               <button
-                onClick={handleCopyBliinkId}
-                disabled={!networkInfo?.bliinkId}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface-active border border-border text-[12px] font-mono text-foreground hover:border-accent/40 transition-colors shrink-0 max-w-[280px]"
-                title="Copy Bliink ID"
+                className="bk-btn"
+                style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, fontWeight: 500, maxWidth: 260 }}
+                onClick={handleChangeDownloadPath}
+                title={settings.downloadPath || "Downloads folder"}
               >
-                <span className="truncate">
-                  {networkInfo?.bliinkId ?? "Starting…"}
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {settings.downloadPath || "Downloads folder"}
                 </span>
-                {copiedId ? (
-                  <Check className="w-3.5 h-3.5 text-success shrink-0" />
-                ) : (
-                  <Copy className="w-3.5 h-3.5 text-muted shrink-0" />
-                )}
               </button>
             </div>
-            <div className="flex items-center justify-between gap-4 mt-3 pt-3 border-t border-border">
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-foreground">Local address</p>
-                <p className="text-xs text-muted mt-0.5">
-                  For devices on this network or a VPN like Tailscale
-                </p>
+          </div>
+
+          {/* Transfers */}
+          <div className="bk-card">
+            <h3>Transfers</h3>
+            <div className="desc">Defaults for incoming and outgoing transfers.</div>
+            <div className="bk-field" style={{ borderTop: "none", paddingTop: 0 }}>
+              <div>
+                <div className="bk-field-label">Require code check</div>
+                <div className="bk-field-sub">Confirm the 6-digit code matches before accepting</div>
+              </div>
+              <Toggle on={settings.requirePin} onChange={(v) => handleSettingChange({ requirePin: v })} />
+            </div>
+            <div className="bk-field">
+              <div>
+                <div className="bk-field-label">Auto-accept files</div>
+                <div className="bk-field-sub">Receive without a confirmation prompt</div>
+              </div>
+              <Toggle on={settings.autoAcceptFromPaired} onChange={(v) => handleSettingChange({ autoAcceptFromPaired: v })} />
+            </div>
+            <div className="bk-field">
+              <div>
+                <div className="bk-field-label">Notifications</div>
+                <div className="bk-field-sub">System alerts for incoming and finished transfers</div>
+              </div>
+              <Toggle on={settings.showNotifications} onChange={(v) => handleSettingChange({ showNotifications: v })} />
+            </div>
+            <div className="bk-field">
+              <div>
+                <div className="bk-field-label">Max concurrent transfers</div>
+                <div className="bk-field-sub">How many run in parallel</div>
+              </div>
+              <select
+                value={settings.maxConcurrentTransfers}
+                onChange={(e) => handleSettingChange({ maxConcurrentTransfers: Number(e.target.value) })}
+                className="bk-btn"
+                style={{ padding: "0 10px" }}
+              >
+                {[1, 2, 3, 5, 10].map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Remote Access */}
+          <div className="bk-card">
+            <h3>Remote Access</h3>
+            <div className="desc">Reach this device from anywhere over the internet — no setup needed.</div>
+            <div className="bk-field" style={{ borderTop: "none", paddingTop: 0 }}>
+              <div style={{ minWidth: 0 }}>
+                <div className="bk-field-label">Bliink ID</div>
+                <div className="bk-field-sub">Copies the full ID — share it to connect over the internet</div>
               </div>
               <button
-                onClick={handleCopyAddress}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface-active border border-border text-[13px] font-mono text-foreground hover:border-accent/40 transition-colors shrink-0"
+                className="bk-btn"
+                style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, letterSpacing: "0.04em", maxWidth: 260 }}
+                disabled={!networkInfo?.bliinkId}
+                onClick={() => networkInfo?.bliinkId && copy(networkInfo.bliinkId, setCopiedId)}
+                title="Copy full Bliink ID"
+              >
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {networkInfo?.bliinkId ? formatBliinkId(networkInfo.bliinkId) : "Starting…"}
+                </span>
+                {copiedId ? <Check size={13} /> : <Copy size={13} />}
+              </button>
+            </div>
+            <div className="bk-field">
+              <div>
+                <div className="bk-field-label">Local address</div>
+                <div className="bk-field-sub">For this network or a VPN like Tailscale</div>
+              </div>
+              <button
+                className="bk-btn"
+                style={{ fontFamily: "var(--font-mono)", fontSize: 11.5 }}
+                onClick={() => networkInfo && copy(`${networkInfo.ip}:${networkInfo.chatPort}`, setCopied)}
                 title="Copy address"
               >
                 {networkInfo ? `${networkInfo.ip}:${networkInfo.chatPort}` : "…"}
-                {copied ? (
-                  <Check className="w-3.5 h-3.5 text-success" />
-                ) : (
-                  <Copy className="w-3.5 h-3.5 text-muted" />
-                )}
+                {copied ? <Check size={13} /> : <Copy size={13} />}
               </button>
             </div>
-            <p className="text-[11px] text-muted mt-3 pt-3 border-t border-border">
-              Internet connections punch through routers directly when possible and fall
-              back to an encrypted relay. Everything stays end-to-end encrypted either
-              way — enable <span className="font-semibold">Require Code Check</span> for
-              extra assurance with new devices.
+            <p style={{ fontSize: 11, color: "var(--faint)", marginTop: 12, lineHeight: 1.55 }}>
+              Internet connections punch through routers directly when possible and fall back
+              to an encrypted relay — end-to-end encrypted either way.
             </p>
           </div>
-        </section>
 
-        {/* About */}
-        <section className="animate-fade-in pt-4 border-t border-border" style={{ animationDelay: "200ms" }}>
-          <div className="flex items-center justify-between">
-             <div className="flex items-center gap-3">
-                <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-surface border border-border">
-                  <Layers className="w-5 h-5 text-accent" />
+          {/* Web Access */}
+          <div className="bk-card">
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+              <div>
+                <h3>Web Access</h3>
+                <div className="desc" style={{ marginBottom: 0 }}>
+                  Let devices without Bliink chat and exchange files from a browser.
                 </div>
+              </div>
+              <button
+                className={webRunning ? "bk-btn danger" : "bk-btn primary"}
+                onClick={handleWebToggle}
+                disabled={webBusy}
+              >
+                {webBusy ? <Loader2 size={14} className="animate-spin" /> : <Power size={14} />}
+                {webRunning ? "Stop server" : "Start server"}
+              </button>
+            </div>
+
+            {webError && (
+              <div className="bk-chip" style={{ height: "auto", padding: "9px 11px", marginTop: 12, color: "var(--danger)", borderColor: "rgba(255,107,122,0.3)", background: "rgba(255,107,122,0.08)", whiteSpace: "normal" }}>
+                {webError}
+              </div>
+            )}
+
+            {webRunning && web ? (
+              <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 14 }}>
+                <div className="bk-field" style={{ borderTop: "none", paddingTop: 0 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div className="bk-field-label">Open in a browser</div>
+                    <div className="bk-field-sub">Same network or VPN as this device</div>
+                  </div>
+                  <button
+                    className="bk-btn"
+                    style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", maxWidth: 240 }}
+                    onClick={() => copy(web.url, setCopiedUrl)}
+                  >
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{web.url}</span>
+                    {copiedUrl ? <Check size={13} /> : <Copy size={13} />}
+                  </button>
+                </div>
+
+                <div className="bk-field">
+                  <div>
+                    <div className="bk-field-label">Access code</div>
+                    <div className="bk-field-sub">Visitors enter this — treat it like a password</div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {(web.code ?? "").split("").map((d, i) => (
+                      <span key={i} className="bk-vcode-group" style={{ fontSize: 18, padding: "6px 10px", borderRadius: 8 }}>
+                        {d}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
                 <div>
-                  <p className="text-sm font-bold text-foreground">Bliink</p>
-                  <p className="text-[11px] text-muted">
-                    {appVersion ? `v${appVersion}` : "dev"} • Tauri v2 + Next.js
-                  </p>
+                  <div className="bk-section-label" style={{ margin: "4px 2px 8px" }}>
+                    <Users size={12} /> Connected browsers — {web.clients.filter((c) => c.online).length}
+                  </div>
+                  {web.clients.length > 0 ? (
+                    web.clients.map((c, i) => (
+                      <div key={i} className="bk-kv-row" style={{ border: "1px solid var(--stroke)", borderRadius: 8, marginBottom: 6 }}>
+                        <span className="k" style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text)" }}>
+                          <span style={{ width: 7, height: 7, borderRadius: "50%", background: c.online ? "var(--accent)" : "var(--faint)" }} />
+                          {c.name}
+                        </span>
+                        <span className="v">{c.online ? "online" : "disconnected"}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <p style={{ fontSize: 12, color: "var(--faint)" }}>
+                      No one has connected yet. Their chats appear in Messages.
+                    </p>
+                  )}
                 </div>
-             </div>
-             <button className="text-[12px] font-medium text-muted hover:text-foreground transition-colors">
-               Check for Updates
-             </button>
-          </div>
-        </section>
-      </div>
-    </div>
-  );
-}
 
-function ToggleSetting({
-  title,
-  description,
-  enabled,
-  onChange,
-}: {
-  title: string;
-  description: string;
-  enabled: boolean;
-  onChange: (value: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center justify-between p-4 rounded-xl bg-surface border border-border">
-      <div>
-        <p className="text-sm font-medium text-foreground">{title}</p>
-        <p className="text-xs text-muted mt-0.5">{description}</p>
+                <div className="bk-chip" style={{ height: "auto", padding: "10px 12px", color: "var(--warn)", borderColor: "rgba(255,200,97,0.25)", background: "rgba(255,200,97,0.06)", whiteSpace: "normal", lineHeight: 1.55, alignItems: "flex-start" }}>
+                  <ShieldAlert size={13} style={{ marginTop: 1, flexShrink: 0 }} />
+                  Web access uses plain HTTP on your local network — unlike app-to-app transfers, browser traffic isn’t end-to-end encrypted. Use trusted networks and stop the server when done.
+                </div>
+              </div>
+            ) : (
+              <p style={{ fontSize: 12, color: "var(--faint)", marginTop: 14, lineHeight: 1.55 }}>
+                <Globe size={13} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6 }} />
+                Start the server to get a link and a 6-digit code. Anyone on your network can open it in a browser.
+              </p>
+            )}
+          </div>
+
+          {/* About */}
+          <div className="bk-card">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <h3 style={{ marginBottom: 2 }}>Bliink</h3>
+                <div className="desc" style={{ marginBottom: 0, fontFamily: "var(--font-mono)" }}>
+                  {appVersion ? `v${appVersion}` : "dev"} · Tauri 2 + Next.js
+                </div>
+              </div>
+              <span className="bk-chip lock"><Check size={10} /> up to date</span>
+            </div>
+          </div>
+        </div>
       </div>
-      <button
-        onClick={() => onChange(!enabled)}
-        className={cn(
-          "relative w-10 h-5.5 rounded-full transition-colors duration-200 shrink-0",
-          enabled ? "bg-accent" : "bg-surface-active border border-border"
-        )}
-        style={{ height: "22px" }}
-      >
-        <span
-          className={cn(
-            "absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform duration-200 shadow-sm",
-            enabled
-              ? "translate-x-[18px] bg-background"
-              : "translate-x-0 bg-muted"
-          )}
-        />
-      </button>
     </div>
   );
 }

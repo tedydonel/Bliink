@@ -1,304 +1,508 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
-import Link from "next/link";
-import { RefreshCw, Send, Radar, Monitor, Wifi, Plus, Globe, X, AlertCircle } from "lucide-react";
-import { useAppStore } from "@/app/lib/store";
-import DeviceCard from "@/app/components/DeviceCard";
-import SearchBar from "@/app/components/SearchBar";
-import { cn } from "@/app/lib/utils";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useRouter } from "next/navigation";
+import {
+  Monitor,
+  Laptop,
+  Smartphone,
+  Tablet,
+  Search,
+  Plus,
+  X,
+  Lock,
+  Check,
+  Send,
+  MessageCircle,
+  Eye,
+  EyeOff,
+  Globe,
+  AlertCircle,
+} from "lucide-react";
+import { useAppStore, type Device, type DeviceType } from "@/app/lib/store";
+import { cn, formatBliinkId } from "@/app/lib/utils";
 import * as api from "@/app/lib/tauri-api";
+import WorldMap, { type MapPeer, type MapHome } from "@/app/components/WorldMap";
+import PairCircle from "@/app/components/PairCircle";
+import { geoSelf, geoForIp, type Geo } from "@/app/lib/geoip";
 
-export default function DevicesPage() {
-  const {
-    devices,
-    selectedDeviceIds,
-    isScanning,
-    toggleDeviceSelection,
-    clearDeviceSelection,
-    setDevices,
-    setIsScanning,
-  } = useAppStore();
-  const [search, setSearch] = useState("");
-  const [showAddDialog, setShowAddDialog] = useState(false);
+// A device belongs to the Internet scope if it's reached over P2P (nodeId) or
+// was added by address (manual / VPN); everything else is local LAN.
+const isInternetPeer = (d: Device) => !!d.nodeId || !!d.manual;
+
+// ── helpers ────────────────────────────────────────────────────
+
+function deviceIcon(type: DeviceType | undefined, size: number) {
+  const props = { size };
+  switch (type) {
+    case "laptop":
+      return <Laptop {...props} />;
+    case "phone":
+      return <Smartphone {...props} />;
+    case "tablet":
+      return <Tablet {...props} />;
+    default:
+      return <Monitor {...props} />;
+  }
+}
+
+// Stable pseudo-position on the radar derived from the device id, so a peer
+// keeps its spot between renders without the backend supplying coordinates.
+function radarPos(id: string) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  const angle = h % 360;
+  const dist = 0.45 + ((h >> 9) % 100) / 100 / 2.2; // 0.45 – 0.90
+  return { angle, dist };
+}
+
+function maskIp(ip: string) {
+  return /^\d+\.\d+\.\d+\.\d+$/.test(ip) ? "•••.•••.•.••" : ip;
+}
+
+// ── peer side panel ────────────────────────────────────────────
+
+function PeerPanel({
+  peer,
+  scope,
+  onClose,
+  onSend,
+  onMessage,
+}: {
+  peer: Device;
+  scope: "lan" | "internet";
+  onClose: () => void;
+  onSend: (d: Device) => void;
+  onMessage: (d: Device) => void;
+}) {
+  const [revealIp, setRevealIp] = useState(false);
+  const isLan = scope === "lan";
+  const incompatible = peer.compatible === false;
+
+  return (
+    <aside className={cn("bk-peer-panel", !isLan && "overlay")}>
+      <div style={{ display: "flex", justifyContent: "flex-end", margin: "-8px -8px -14px 0" }}>
+        <button className="bk-iconbtn" onClick={onClose} title="Close">
+          <X size={14} />
+        </button>
+      </div>
+
+      <div className="bk-peer-hero">
+        <div className="bk-peer-hero-avatar">{deviceIcon(peer.deviceType, 28)}</div>
+        <div>
+          <div className="bk-peer-hero-name">{peer.name}</div>
+          <div className="bk-peer-hero-device">{peer.os || (isLan ? "Local device" : "Internet peer")}</div>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <span className="bk-chip lock"><Lock size={11} /> AES-256-GCM</span>
+          {peer.manual ? (
+            <span className="bk-chip">added manually</span>
+          ) : (
+            <span className="bk-chip"><Check size={11} /> discovered</span>
+          )}
+        </div>
+      </div>
+
+      {incompatible ? (
+        <div className="bk-chip" style={{ height: "auto", padding: "9px 11px", color: "var(--warn)", borderColor: "rgba(255,200,97,0.3)", background: "rgba(255,200,97,0.08)", whiteSpace: "normal", lineHeight: 1.5 }}>
+          This device runs an incompatible Bliink version. Update both to connect.
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="bk-btn primary" style={{ flex: 1 }} onClick={() => onSend(peer)}>
+            <Send size={14} /> Send files
+          </button>
+          <button className="bk-btn" style={{ flex: 1 }} onClick={() => onMessage(peer)}>
+            <MessageCircle size={14} /> Message
+          </button>
+        </div>
+      )}
+
+      <div className="bk-kv">
+        <div className="bk-kv-row">
+          <span className="k">{isLan ? "Address" : "Bliink ID"}</span>
+          <span className="v" style={{ display: "flex", alignItems: "center", gap: 7 }}>
+            {isLan
+              ? revealIp
+                ? `${peer.ip}:${peer.port}`
+                : maskIp(peer.ip)
+              : formatBliinkId(peer.nodeId)}
+            {isLan ? (
+              <button className="bk-eye" title={revealIp ? "Hide" : "Reveal"} onClick={() => setRevealIp(!revealIp)}>
+                {revealIp ? <EyeOff size={13} /> : <Eye size={13} />}
+              </button>
+            ) : null}
+          </span>
+        </div>
+        <div className="bk-kv-row">
+          <span className="k">Status</span>
+          <span className={cn("v", peer.status !== "offline" && "good")}>{peer.status}</span>
+        </div>
+        <div className="bk-kv-row">
+          <span className="k">Transport</span>
+          <span className="v">{isLan ? "Direct · LAN" : "P2P · relay fallback"}</span>
+        </div>
+        {peer.os ? (
+          <div className="bk-kv-row">
+            <span className="k">Platform</span>
+            <span className="v">{peer.os}</span>
+          </div>
+        ) : null}
+      </div>
+
+      <p style={{ fontSize: 11, color: "var(--faint)", lineHeight: 1.55 }}>
+        Transfers to {peer.name} are encrypted end-to-end.{" "}
+        {isLan
+          ? "Data never leaves your local network."
+          : "Data is relayed encrypted — the relay can't read it."}
+      </p>
+    </aside>
+  );
+}
+
+// ── LAN radar ──────────────────────────────────────────────────
+
+function RadarView({
+  peers,
+  selected,
+  onSelect,
+}: {
+  peers: Device[];
+  selected: string | null;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <div className="bk-radar-wrap">
+      <div className="bk-radar">
+        {[0, 1, 2, 3, 4, 5].map((i) => (
+          <div key={i} className="bk-ripple" />
+        ))}
+        <div className="bk-glow-pulse" />
+        <div className="bk-radar-center">
+          <div className="bk-radar-core">
+            <Monitor size={22} />
+          </div>
+          <div className="bk-radar-center-label">this PC</div>
+        </div>
+        {peers.map((p, i) => {
+          const { angle, dist } = radarPos(p.id);
+          const rad = (angle * Math.PI) / 180;
+          const r = dist * 49;
+          const x = 50 + Math.cos(rad) * r;
+          const y = 50 + Math.sin(rad) * r * 0.92;
+          return (
+            <button
+              key={p.id}
+              className={cn("bk-peer-node", selected === p.id && "selected")}
+              style={{ left: `${x}%`, top: `${y}%` }}
+              onClick={() => onSelect(p.id)}
+            >
+              <div className="bk-peer-dot">
+                {deviceIcon(p.deviceType, 18)}
+                <span className="bk-peer-ping" style={{ animationDelay: `${i * 0.8}s` }} />
+              </div>
+              <span className="bk-peer-label">{p.name}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Internet: world map + peer list ────────────────────────────
+
+function mapStatus(d: Device): MapPeer["status"] {
+  if (d.status === "transferring") return "transfer";
+  if (d.status === "offline") return "idle";
+  return "connected";
+}
+
+function InternetView({
+  peers,
+  selected,
+  onSelect,
+  onAdded,
+  query,
+}: {
+  peers: Device[];
+  selected: string | null;
+  onSelect: (id: string) => void;
+  onAdded: () => void;
+  query: string;
+}) {
+  const [home, setHome] = useState<MapHome | null>(null);
+  const [geo, setGeo] = useState<Record<string, Geo>>({});
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // This device's location anchors the arcs.
+  useEffect(() => {
+    let alive = true;
+    geoSelf().then((g) => {
+      if (alive && g) setHome({ lon: g.lon, lat: g.lat, label: `you · ${g.city ?? "here"}` });
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Locate any peer that exposes a public IP. Pure-relay P2P peers (no IP yet)
+  // stay in the list below until the backend surfaces their direct address.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      for (const p of peers) {
+        if (geo[p.id] || !p.ip) continue;
+        const g = await geoForIp(p.ip);
+        if (alive && g) setGeo((prev) => ({ ...prev, [p.id]: g }));
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [peers, geo]);
+
+  const mapPeers: MapPeer[] = useMemo(
+    () =>
+      peers
+        .filter((p) => geo[p.id])
+        .map((p) => ({
+          id: p.id,
+          name: p.name,
+          lon: geo[p.id].lon,
+          lat: geo[p.id].lat,
+          status: mapStatus(p),
+        })),
+    [peers, geo]
+  );
+
+  const q = query.toLowerCase();
+  const listed = peers.filter((p) => p.name.toLowerCase().includes(q));
+
+  return (
+    <div className="bk-internet" ref={scrollRef}>
+      {/* full-page map; the peer table sits below it on scroll (like the prototype) */}
+      <div style={{ position: "relative", minHeight: "100%", flexShrink: 0, display: "flex" }}>
+        <WorldMap
+          peers={mapPeers}
+          home={home}
+          selected={selected}
+          onSelect={onSelect}
+          query={query}
+        />
+        <PairCircle onAdded={onAdded} />
+      </div>
+
+      <div className="bk-table-wrap">
+        <div className="bk-table-row head">
+          <span>Peer</span>
+          <span>Route</span>
+          <span>Status</span>
+          <span />
+        </div>
+        <div className="bk-table-scroll">
+          {listed.map((p) => {
+            const st = p.status === "transferring" ? "tx" : p.status === "offline" ? "off" : "on";
+            return (
+              <div
+                key={p.id}
+                className={cn("bk-table-row", selected === p.id && "selected")}
+                style={{ gridTemplateColumns: "minmax(170px,1.6fr) 1.2fr 1fr auto" }}
+                onClick={() => onSelect(p.id)}
+              >
+                <span className="bk-table-peer">
+                  <span className="bk-row-avatar sm">{deviceIcon(p.deviceType, 15)}</span>
+                  <span style={{ minWidth: 0 }}>
+                    <span className="nm">{p.name}</span>
+                    <span className="dv">{geo[p.id]?.city ?? (p.nodeId ? "P2P" : "remote")}</span>
+                  </span>
+                </span>
+                <span className="mono">{p.nodeId ? formatBliinkId(p.nodeId) : `${p.ip}:${p.port}`}</span>
+                <span className={cn("bk-status", st)}>
+                  <i />
+                  {p.status}
+                </span>
+                <span className="bk-table-actions" onClick={(e) => e.stopPropagation()}>
+                  <button className="bk-iconbtn" title="Select" onClick={() => onSelect(p.id)}>
+                    <Globe size={14} />
+                  </button>
+                </span>
+              </div>
+            );
+          })}
+          {listed.length === 0 ? (
+            <div className="bk-empty" style={{ padding: 26 }}>
+              <h3>No internet peers yet</h3>
+              <p>Use the <b style={{ color: "var(--accent)" }}>+</b> on the map above to pair by Bliink ID — direct P2P with encrypted relay fallback.</p>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Network view ───────────────────────────────────────────────
+
+export default function NetworkPage() {
+  const router = useRouter();
+  const { devices, setDevices, scope } = useAppStore();
+  const [selected, setSelected] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [scanning, setScanning] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
   const isTauri = useRef(false);
 
   useEffect(() => {
     isTauri.current =
-      typeof window !== "undefined" &&
-      !!(window as any).__TAURI_INTERNALS__;
+      typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+    if (!isTauri.current) {
+      setScanning(false);
+      return;
+    }
 
-    if (!isTauri.current) return;
-
-    let unlistenDevices: (() => void) | undefined;
-
+    let unlisten: (() => void) | undefined;
     const init = async () => {
-      // Auto-start discovery on mount
       try {
         await api.startDiscovery();
       } catch (e) {
         console.warn("Auto-discovery start failed:", e);
       }
-
       const devs = await api.getDevices();
       if (devs.length > 0) setDevices(devs);
-
-      unlistenDevices = await api.onDevicesUpdated((updatedDevices) => {
-        setDevices(updatedDevices);
-      });
+      unlisten = await api.onDevicesUpdated(setDevices);
     };
     init();
 
+    const t = setTimeout(() => setScanning(false), 2800);
     return () => {
-      unlistenDevices?.();
+      clearTimeout(t);
+      unlisten?.();
     };
   }, [setDevices]);
 
-  const handleScan = useCallback(async () => {
-    setIsScanning(true);
-    if (isTauri.current) {
-      try {
-        await api.startDiscovery();
-        // Keep scanning state for a few seconds to allow discovery packets
-        setTimeout(async () => {
-          const devs = await api.getDevices();
-          setDevices(devs);
-          setIsScanning(false);
-        }, 4000);
-      } catch (e) {
-        console.error("Discovery error:", e);
-        setIsScanning(false);
-      }
-    } else {
-      setTimeout(() => setIsScanning(false), 2000);
-    }
-  }, [setDevices, setIsScanning]);
+  // Selecting away from a scope clears the highlight.
+  useEffect(() => setSelected(null), [scope]);
 
-  const handleRemoveDevice = useCallback(
-    async (id: string) => {
-      await api.removeManualDevice(id);
-      const devs = await api.getDevices();
-      setDevices(devs);
+  const isLan = scope === "lan";
+  const scopedPeers = devices.filter((d) => (isLan ? !isInternetPeer(d) : isInternetPeer(d)));
+  const filtered = scopedPeers.filter((p) =>
+    p.name.toLowerCase().includes(query.toLowerCase())
+  );
+  const sel = scopedPeers.find((p) => p.id === selected) || null;
+
+  const handleSend = useCallback(
+    async (d: Device) => {
+      const files = await api.openFileDialog();
+      if (files.length === 0) return;
+      await api.sendFiles(
+        files.map((f) => f.path),
+        d.ip,
+        d.port,
+        d.id,
+        d.name
+      );
+      router.push("/transfer");
     },
-    [setDevices]
+    [router]
   );
 
-  const handleDeviceAdded = useCallback(async () => {
-    setShowAddDialog(false);
+  const handleMessage = useCallback(
+    (d: Device) => router.push(`/chats?peer=${encodeURIComponent(d.id)}`),
+    [router]
+  );
+
+  const refreshDevices = useCallback(async () => {
+    setShowAdd(false);
     const devs = await api.getDevices();
     setDevices(devs);
   }, [setDevices]);
 
-  const filtered = devices.filter(
-    (d) =>
-      d.name.toLowerCase().includes(search.toLowerCase()) ||
-      d.ip.includes(search)
-  );
-
-  const online = filtered.filter((d) => d.status !== "offline");
-  const offline = filtered.filter((d) => d.status === "offline");
+  const sub = isLan
+    ? scanning
+      ? "Scanning your local network…"
+      : `${filtered.filter((d) => d.status !== "offline").length} device${filtered.length === 1 ? "" : "s"} discovered · UDP discovery`
+    : `${scopedPeers.length} paired · encrypted P2P`;
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between px-8 pt-7 pb-5 shrink-0">
-        <div>
-          <h1 className="text-xl font-bold text-foreground tracking-tight">Devices</h1>
-          <p className="text-[13px] text-muted mt-1">
-            Discover and connect to nearby Bliink devices on your network
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {selectedDeviceIds.length > 0 && (
-            <button
-              onClick={clearDeviceSelection}
-              className="px-3.5 py-2 text-[12px] font-semibold text-muted-light rounded-lg border border-border hover:bg-surface-hover transition-colors"
-            >
-              Clear ({selectedDeviceIds.length})
-            </button>
-          )}
-          <button
-            onClick={() => setShowAddDialog(true)}
-            className="flex items-center gap-2 px-3.5 py-2.5 text-[13px] font-semibold text-muted-light rounded-lg border border-border hover:bg-surface-hover hover:text-foreground transition-colors"
+    <div className="bk-view">
+      <div className="bk-view-head bk-net-head">
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
+          <div className="bk-view-title">Network</div>
+          <div
+            className="bk-view-sub"
+            style={{ marginTop: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
           >
-            <Plus className="w-4 h-4" />
-            Add Device
-          </button>
-          <button
-            onClick={handleScan}
-            disabled={isScanning}
-            className={cn(
-              "flex items-center gap-2.5 px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-all",
-              isScanning
-                ? "bg-accent/10 text-accent border border-accent/20"
-                : "bg-accent text-background hover:bg-accent-hover shadow-[0_0_20px_rgba(56,189,248,0.15)]"
-            )}
-          >
-            {isScanning ? (
-              <span className="relative">
-                <Radar className="w-4 h-4 animate-spin" />
-              </span>
-            ) : (
-              <RefreshCw className="w-4 h-4" />
-            )}
-            {isScanning ? "Scanning..." : "Scan Network"}
-          </button>
-        </div>
-      </div>
-
-      {/* Search */}
-      <div className="px-8 pb-4 shrink-0">
-        <SearchBar
-          value={search}
-          onChange={setSearch}
-          placeholder="Filter devices by name or IP address..."
-        />
-      </div>
-
-      {/* Device list */}
-      <div className="flex-1 overflow-auto px-8 pb-6">
-        {devices.length === 0 && !isScanning ? (
-          <div className="flex flex-col items-center justify-center h-full text-center py-16">
-            <div className="relative mb-5">
-              <div className="flex items-center justify-center w-20 h-20 rounded-2xl bg-surface border border-border">
-                <Monitor className="w-8 h-8 text-muted" />
-              </div>
-              <div className="absolute -bottom-1 -right-1 flex items-center justify-center w-7 h-7 rounded-full bg-sky/15 border border-sky/20">
-                <Wifi className="w-3.5 h-3.5 text-sky" />
-              </div>
-            </div>
-            <p className="text-[15px] font-semibold text-foreground">
-              No devices discovered yet
-            </p>
-            <p className="text-[13px] text-muted mt-1.5 max-w-[300px]">
-              Click <span className="text-accent font-semibold">Scan Network</span> to find other devices running Bliink on your local network.
-            </p>
+            {sub}
           </div>
-        ) : (
-          <>
-            {online.length > 0 && (
-              <div className="animate-fade-in">
-                <h2 className="text-[11px] font-bold text-muted uppercase tracking-widest mb-3">
-                  Available — {online.length}
-                </h2>
-                <div className="flex flex-col gap-2">
-                  {online.map((device, i) => (
-                    <div
-                      key={device.id}
-                      className="animate-fade-in"
-                      style={{ animationDelay: `${i * 40}ms` }}
-                    >
-                      <DeviceCard
-                        device={device}
-                        selected={selectedDeviceIds.includes(device.id)}
-                        onSelect={toggleDeviceSelection}
-                        onRemove={handleRemoveDevice}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {offline.length > 0 && (
-              <div className="mt-6 animate-fade-in">
-                <h2 className="text-[11px] font-bold text-muted uppercase tracking-widest mb-3">
-                  Offline — {offline.length}
-                </h2>
-                <div className="flex flex-col gap-2 opacity-50">
-                  {offline.map((device) => (
-                    <DeviceCard
-                      key={device.id}
-                      device={device}
-                      selected={selectedDeviceIds.includes(device.id)}
-                      onSelect={toggleDeviceSelection}
-                      onRemove={handleRemoveDevice}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {filtered.length === 0 && devices.length > 0 && (
-              <div className="flex flex-col items-center justify-center h-48 text-center">
-                <Radar className="w-8 h-8 text-muted mb-3" />
-                <p className="text-[13px] font-medium text-muted-light">
-                  No devices match your search
-                </p>
-              </div>
-            )}
-          </>
+        </div>
+        <div className="bk-head-spacer" />
+        {isLan && (
+          <button className="bk-iconbtn" title="Add a device by IP / VPN" onClick={() => setShowAdd(true)}>
+            <Plus size={16} />
+          </button>
         )}
+        <div className="bk-input" style={{ width: 220 }}>
+          <Search size={15} />
+          <input
+            placeholder="Search active users…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
       </div>
 
-      {/* Bottom action bar */}
-      {selectedDeviceIds.length > 0 && (
-        <div className="flex items-center justify-between px-8 py-4 border-t border-border bg-surface/80 backdrop-blur-sm shrink-0 animate-fade-in">
-          <span className="text-[13px] text-muted-light">
-            <span className="font-bold text-accent">
-              {selectedDeviceIds.length}
-            </span>{" "}
-            device{selectedDeviceIds.length > 1 ? "s" : ""} selected
-          </span>
-          <Link
-            href="/transfer"
-            className="flex items-center gap-2.5 px-5 py-2.5 text-[13px] font-semibold rounded-lg bg-accent text-background hover:bg-accent-hover transition-all shadow-[0_0_20px_rgba(56,189,248,0.15)]"
-          >
-            <Send className="w-4 h-4" />
-            Send Files
-          </Link>
-        </div>
-      )}
+      <div className="bk-net-body">
+        {isLan ? (
+          <RadarView peers={filtered} selected={selected} onSelect={(id) => setSelected(id === selected ? null : id)} />
+        ) : (
+          <InternetView
+            peers={filtered}
+            selected={selected}
+            onSelect={(id) => setSelected(id === selected ? null : id)}
+            onAdded={refreshDevices}
+            query={query}
+          />
+        )}
+        {sel ? (
+          <PeerPanel
+            peer={sel}
+            scope={scope}
+            onClose={() => setSelected(null)}
+            onSend={handleSend}
+            onMessage={handleMessage}
+          />
+        ) : null}
+      </div>
 
-      {showAddDialog && (
-        <AddDeviceDialog
-          onAdded={handleDeviceAdded}
-          onClose={() => setShowAddDialog(false)}
-        />
-      )}
+      {showAdd && <AddRemoteDialog onAdded={refreshDevices} onClose={() => setShowAdd(false)} />}
     </div>
   );
 }
 
-function AddDeviceDialog({
+// ── Add device dialog (re-skinned to the design system) ─────────
+
+function AddRemoteDialog({
   onAdded,
   onClose,
 }: {
   onAdded: () => void;
   onClose: () => void;
 }) {
-  const [mode, setMode] = useState<"internet" | "ip">("internet");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("9101");
-  const [bliinkId, setBliinkId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleAdd = async () => {
     setError(null);
-    if (mode === "internet") {
-      if (!bliinkId.trim()) {
-        setError("Paste the other device's Bliink ID");
-        return;
-      }
-      setBusy(true);
-      try {
-        await api.addInternetDevice(bliinkId.trim());
-        onAdded();
-      } catch (e: any) {
-        setError(String(e?.message ?? e));
-        setBusy(false);
-      }
-      return;
-    }
-
     const portNum = Number(port);
     if (!host.trim()) {
       setError("Enter the device's IP address or hostname");
       return;
     }
     if (!portNum || portNum < 1 || portNum > 65535) {
-      setError("Enter a valid port (the other device shows it in Settings)");
+      setError("Enter a valid port (shown on the other device's Settings)");
       return;
     }
     setBusy(true);
@@ -312,120 +516,46 @@ function AddDeviceDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
-      <div className="w-[420px] p-6 rounded-2xl bg-surface border border-border shadow-2xl">
-        <div className="flex items-center gap-3 mb-1">
-          <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-sky/10 border border-sky/20 shrink-0">
-            <Globe className="w-5 h-5 text-sky" />
+    <div className="bk-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="bk-modal">
+        <h2>Add a device by address</h2>
+        <p className="sub">Reach a device on your LAN or a VPN like Tailscale by its address. To connect over the internet, switch to the Internet tab and pair by Bliink ID.</p>
+
+        <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+          <div>
+            <div className="bk-section-label" style={{ margin: "0 2px 8px" }}>Host or IP address</div>
+            <div className="bk-input">
+              <input
+                value={host}
+                onChange={(e) => setHost(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+                placeholder="e.g. 100.84.12.7 or my-pc.tailnet.ts.net"
+                autoFocus
+              />
+            </div>
           </div>
           <div>
-            <p className="text-[15px] font-bold text-foreground">Add a remote device</p>
-            <p className="text-[11px] text-muted mt-0.5">
-              Connect to a device that isn't on this network
-            </p>
-          </div>
-          <button onClick={onClose} className="ml-auto p-1 text-muted hover:text-foreground">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Mode toggle */}
-        <div className="flex gap-1.5 mt-4 p-1 rounded-lg bg-surface-active border border-border">
-          {(
-            [
-              { key: "internet", label: "Over the internet" },
-              { key: "ip", label: "IP address / VPN" },
-            ] as const
-          ).map((m) => (
-            <button
-              key={m.key}
-              onClick={() => {
-                setMode(m.key);
-                setError(null);
-              }}
-              className={cn(
-                "flex-1 py-1.5 text-[12px] font-semibold rounded-md transition-all",
-                mode === m.key
-                  ? "bg-accent/15 text-accent border border-accent/20"
-                  : "text-muted hover:text-foreground border border-transparent"
-              )}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="mt-4 space-y-3">
-          {mode === "internet" ? (
-            <div>
-              <label className="text-[11px] font-bold text-muted uppercase tracking-wider block mb-1.5">
-                Bliink ID
-              </label>
-              <textarea
-                value={bliinkId}
-                onChange={(e) => setBliinkId(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), handleAdd())}
-                placeholder="Paste the ID from the other device's Settings → Remote Access"
-                rows={2}
-                autoFocus
-                className="w-full px-3 py-2.5 rounded-lg bg-surface-active border border-border text-[13px] font-mono text-foreground focus:outline-none focus:border-accent/40 placeholder:text-muted/40 placeholder:font-sans resize-none break-all"
+            <div className="bk-section-label" style={{ margin: "0 2px 8px" }}>Port</div>
+            <div className="bk-input" style={{ width: 140 }}>
+              <input
+                value={port}
+                onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))}
+                onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+                style={{ fontFamily: "var(--font-mono)" }}
               />
-              <p className="text-[11px] text-muted mt-1.5">
-                Works from anywhere — connects directly when possible, falls back
-                to an encrypted relay otherwise. Both devices need internet access.
-              </p>
             </div>
-          ) : (
-            <>
-              <div>
-                <label className="text-[11px] font-bold text-muted uppercase tracking-wider block mb-1.5">
-                  Host or IP address
-                </label>
-                <input
-                  type="text"
-                  value={host}
-                  onChange={(e) => setHost(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-                  placeholder="e.g. 100.84.12.7 or my-pc.tailnet.ts.net"
-                  autoFocus
-                  className="w-full h-10 px-3 rounded-lg bg-surface-active border border-border text-sm text-foreground focus:outline-none focus:border-accent/40 placeholder:text-muted/40"
-                />
-              </div>
-              <div>
-                <label className="text-[11px] font-bold text-muted uppercase tracking-wider block mb-1.5">
-                  Port
-                </label>
-                <input
-                  type="text"
-                  value={port}
-                  onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))}
-                  onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-                  className="w-full h-10 px-3 rounded-lg bg-surface-active border border-border text-sm text-foreground focus:outline-none focus:border-accent/40"
-                />
-                <p className="text-[11px] text-muted mt-1.5">
-                  Shown on the other device under Settings → Remote Access
-                </p>
-              </div>
-            </>
-          )}
+          </div>
 
           {error && (
-            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-danger/10 border border-danger/20 text-danger text-[12px]">
-              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-              <span>{error}</span>
+            <div className="bk-chip" style={{ height: "auto", padding: "9px 11px", color: "var(--danger)", borderColor: "rgba(255,107,122,0.3)", background: "rgba(255,107,122,0.08)", whiteSpace: "normal" }}>
+              <AlertCircle size={13} /> {error}
             </div>
           )}
+        </div>
 
-          <button
-            onClick={handleAdd}
-            disabled={busy}
-            className={cn(
-              "w-full py-2.5 text-[13px] font-semibold rounded-lg transition-all",
-              busy
-                ? "bg-accent/10 text-accent border border-accent/20"
-                : "bg-accent text-background hover:bg-accent-hover"
-            )}
-          >
+        <div className="bk-modal-actions">
+          <button className="bk-btn ghost" onClick={onClose}>Cancel</button>
+          <button className="bk-btn primary" disabled={busy} onClick={handleAdd}>
             {busy ? "Connecting…" : "Connect"}
           </button>
         </div>

@@ -42,3 +42,6 @@ next-env.d.ts
 
 # design files
 *.pen
+
+# UI design prototype (local reference only)
+UI/
