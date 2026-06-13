@@ -43,7 +43,6 @@ No cloud. No accounts. No size limits. Devices find each other automatically and
 | 💬 **Built-in chat** | WhatsApp-style messaging with attachments, voice notes, replies, read receipts and typing indicators — all over the same encryption |
 | 📞 **Audio calls** | Call any device on your network — WebRTC, no servers involved |
 | 🌍 **Works over the internet** | Add a device by its **Bliink ID** — direct P2P with NAT hole punching, encrypted relay fallback, zero setup |
-| 🌐 **Web Access** | Share with devices that don't have the app — browsers get a code-protected chat & file page |
 
 ## 📸 Screenshots
 
@@ -141,7 +140,6 @@ The wire protocol is versioned by release — both devices should run the same v
 - [x] 💬 Built-in chat (text, attachments, voice notes, receipts, typing)
 - [x] 📞 Audio calls over the LAN
 - [x] 🌍 Remote devices by address (VPN / port-forward friendly)
-- [x] 🌐 Web access — share with devices that don't have the app, from your browser
 - [x] 🛰️ True internet P2P — connect by Bliink ID with hole punching + relay fallback
 - [ ] 🔗 PIN-bound device pairing
 - [ ] 📡 mDNS discovery

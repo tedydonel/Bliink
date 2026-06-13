@@ -60,10 +60,7 @@ dirs-next = "2.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
 base64 = "0.22"
 
-# Web access server
-axum = { version = "0.7", features = ["ws", "multipart"] }
-tokio-util = { version = "0.7", features = ["io"] }
-futures-util = "0.3"
+# Internet P2P (NAT hole punching + encrypted relay)
 iroh = "0.29.0"
 
 [target.'cfg(windows)'.dependencies]

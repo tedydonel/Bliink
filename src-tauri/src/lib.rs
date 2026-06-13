@@ -8,7 +8,6 @@ mod p2p;
 mod thumbs;
 mod transfer;
 mod types;
-mod web;
 
 use chat::{ChatEvent, ChatService, ChatStore};
 use commands::AppState;
@@ -260,7 +259,6 @@ pub fn run() {
             let chat_store = Arc::new(
                 ChatStore::new(&data_dir.join("history.db")).expect("Failed to open chat store"),
             );
-            let web_broker = Arc::new(web::WebBroker::default());
             let chat_service = Arc::new(ChatService::new(
                 device_id.clone(),
                 device_name.clone(),
@@ -269,7 +267,6 @@ pub fn run() {
                 discovery.clone(),
                 transfer.clone(),
                 chat_media_dir.clone(),
-                web_broker.clone(),
             ));
             {
                 let svc = chat_service.clone();
@@ -417,8 +414,6 @@ pub fn run() {
                 thumb_cache_dir,
                 transfer_port: service_port,
                 chat_port,
-                web_broker,
-                web_server: Arc::new(Mutex::new(None)),
                 p2p: p2p_state,
                 p2p_secret: Some(p2p_secret_hex),
             });
@@ -450,9 +445,6 @@ pub fn run() {
             commands::add_internet_device,
             commands::remove_manual_device,
             commands::get_network_info,
-            commands::start_web_server,
-            commands::stop_web_server,
-            commands::get_web_server_status,
             commands::get_conversations,
             commands::get_chat_messages,
             commands::send_chat_message,

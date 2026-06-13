@@ -207,8 +207,7 @@ export default function ChatsPage() {
                     : "offline · messages queue"}
                 </div>
               </div>
-              {!activeId.startsWith("web-") && (
-                <button
+              <button
                   className="bk-iconbtn"
                   onClick={() => callManager.startCall(activeId, activeName)}
                   disabled={!activeOnline || callState.status !== "idle"}
@@ -233,7 +232,6 @@ export default function ChatsPage() {
                 >
                   <Phone size={16} />
                 </button>
-              )}
               <span className="bk-chip lock">
                 <Lock size={10} /> end-to-end
               </span>
