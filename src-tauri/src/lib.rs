@@ -22,19 +22,43 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::Mutex;
 
-/// Bind a TCP listener on the preferred port, falling back to a random
-/// one (remote dial-in won't work then, but LAN still does).
-fn bind_listener(preferred_port: u16, label: &str) -> std::net::TcpListener {
-    if preferred_port != 0 {
-        match std::net::TcpListener::bind(("0.0.0.0", preferred_port)) {
-            Ok(listener) => return listener,
-            Err(e) => log::warn!(
-                "{} port {} unavailable ({}); falling back to a random port — remote devices won't be able to dial in this session",
-                label, preferred_port, e
-            ),
+/// Bind a non-blocking TCP listener on the preferred port, falling back to a
+/// random one (remote dial-in won't work then, but LAN still does). Returns
+/// the listener and the actual bound port, or None if binding is impossible —
+/// the caller degrades gracefully rather than crashing the whole app.
+fn bind_listener(preferred_port: u16, label: &str) -> Option<(std::net::TcpListener, u16)> {
+    let listener = preferred_port
+        .checked_sub(0)
+        .filter(|p| *p != 0)
+        .and_then(|p| std::net::TcpListener::bind(("0.0.0.0", p)).ok())
+        .or_else(|| {
+            if preferred_port != 0 {
+                log::warn!(
+                    "{} port {} unavailable; falling back to a random port — remote devices won't be able to dial in this session",
+                    label, preferred_port
+                );
+            }
+            std::net::TcpListener::bind("0.0.0.0:0").ok()
+        });
+
+    let listener = match listener {
+        Some(l) => l,
+        None => {
+            error!("Failed to bind {} listener on any port", label);
+            return None;
+        }
+    };
+    if let Err(e) = listener.set_nonblocking(true) {
+        error!("Failed to set {} listener non-blocking: {}", label, e);
+        return None;
+    }
+    match listener.local_addr() {
+        Ok(addr) => Some((listener, addr.port())),
+        Err(e) => {
+            error!("Failed to read {} listener address: {}", label, e);
+            None
         }
     }
-    std::net::TcpListener::bind("0.0.0.0:0").expect("Failed to bind listener")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -43,12 +67,24 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+            // Always initialize logging. In release we additionally write to a
+            // rotating file in the app log dir so a crash on someone else's PC
+            // leaves something to diagnose. Logger init is best-effort — a
+            // failure here must never stop the app from starting.
+            {
+                let mut builder = tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .target(tauri_plugin_log::Target::new(
+                        tauri_plugin_log::TargetKind::Stdout,
+                    ));
+                if !cfg!(debug_assertions) {
+                    builder = builder.target(tauri_plugin_log::Target::new(
+                        tauri_plugin_log::TargetKind::LogDir {
+                            file_name: Some("bliink".into()),
+                        },
+                    ));
+                }
+                let _ = app.handle().plugin(builder.build());
             }
 
             // Load persisted settings + stable device identity
@@ -61,24 +97,13 @@ pub fn run() {
             let device_name = settings.device_name.clone();
 
             // Bind listeners — fixed ports (settings) so remote peers can
-            // dial in, falling back to random if taken
-            let listener = bind_listener(settings.transfer_port, "transfer");
-            listener
-                .set_nonblocking(true)
-                .expect("Failed to set nonblocking");
-            let service_port = listener
-                .local_addr()
-                .expect("Failed to get local address")
-                .port();
-
-            let chat_listener = bind_listener(settings.chat_port, "chat");
-            chat_listener
-                .set_nonblocking(true)
-                .expect("Failed to set nonblocking");
-            let chat_port = chat_listener
-                .local_addr()
-                .expect("Failed to get local address")
-                .port();
+            // dial in, falling back to random if taken. If the OS can't give
+            // us any TCP port at all, surface a clear error instead of a
+            // silent crash.
+            let (listener, service_port) = bind_listener(settings.transfer_port, "transfer")
+                .ok_or("Could not start the file-transfer listener on any port")?;
+            let (chat_listener, chat_port) = bind_listener(settings.chat_port, "chat")
+                .ok_or("Could not start the chat listener on any port")?;
 
             info!(
                 "Transfer listener on port {}, chat listener on port {}",
@@ -255,10 +280,10 @@ pub fn run() {
                 });
             }
 
-            // Chat service: persistent encrypted channels + message store
-            let chat_store = Arc::new(
-                ChatStore::new(&data_dir.join("history.db")).expect("Failed to open chat store"),
-            );
+            // Chat service: persistent encrypted channels + message store.
+            // Resilient open: a corrupt DB is recreated, worst case in-memory,
+            // so a bad history.db can never crash startup.
+            let chat_store = Arc::new(ChatStore::open_resilient(&data_dir.join("history.db")));
             let chat_service = Arc::new(ChatService::new(
                 device_id.clone(),
                 device_name.clone(),
@@ -333,10 +358,13 @@ pub fn run() {
             // Start transfer listener
             let transfer_clone = transfer.clone();
             tauri::async_runtime::spawn(async move {
-                let tokio_listener = tokio::net::TcpListener::from_std(listener)
-                    .expect("Failed to convert to tokio listener");
-                if let Err(e) = transfer_clone.start_with_listener(tokio_listener).await {
-                    error!("Failed to start transfer listener: {}", e);
+                match tokio::net::TcpListener::from_std(listener) {
+                    Ok(tokio_listener) => {
+                        if let Err(e) = transfer_clone.start_with_listener(tokio_listener).await {
+                            error!("Failed to start transfer listener: {}", e);
+                        }
+                    }
+                    Err(e) => error!("Failed to convert transfer listener: {}", e),
                 }
             });
 

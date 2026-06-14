@@ -1,5 +1,5 @@
 use crate::types::{HistoryEntry, TransferDirection};
-use log::info;
+use log::{info, warn};
 use rusqlite::Connection;
 use std::path::Path;
 use tokio::sync::Mutex;
@@ -8,10 +8,47 @@ pub struct HistoryStore {
     conn: Mutex<Connection>,
 }
 
+/// Delete a SQLite database and its WAL/SHM sidecars. Used to recover from a
+/// corrupt file rather than crashing on every launch.
+pub(crate) fn remove_db_files(db_path: &Path) {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let p = if suffix.is_empty() {
+            db_path.to_path_buf()
+        } else {
+            let mut s = db_path.as_os_str().to_owned();
+            s.push(suffix);
+            std::path::PathBuf::from(s)
+        };
+        let _ = std::fs::remove_file(&p);
+    }
+}
+
 impl HistoryStore {
+    /// Open the history store, recreating the database once if it turns out to
+    /// be corrupt or otherwise unusable (a corrupt file would otherwise fail
+    /// on every launch).
     pub fn new(db_path: &Path) -> Result<Self, String> {
+        match Self::open(db_path) {
+            Ok(store) => Ok(store),
+            Err(e) => {
+                warn!(
+                    "History database at {:?} unusable ({}); recreating",
+                    db_path, e
+                );
+                remove_db_files(db_path);
+                Self::open(db_path)
+            }
+        }
+    }
+
+    fn open(db_path: &Path) -> Result<Self, String> {
         let conn = Connection::open(db_path)
             .map_err(|e| format!("Failed to open history database: {}", e))?;
+
+        // WAL + a busy timeout so this connection and the chat store (which
+        // share the same file) don't trip over each other's locks.
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "busy_timeout", 5000);
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS history (
@@ -45,6 +82,11 @@ impl HistoryStore {
         ] {
             let _ = conn.execute(stmt, []);
         }
+
+        // Force a read so a corrupt page surfaces here (and triggers a
+        // recreate) instead of failing later at runtime.
+        conn.query_row("SELECT COUNT(*) FROM history", [], |row| row.get::<_, i64>(0))
+            .map_err(|e| format!("History database integrity check failed: {}", e))?;
 
         info!("History database initialized at {:?}", db_path);
         Ok(Self {

@@ -11,6 +11,41 @@ const DISCOVERY_PORT: u16 = 9001;
 const BROADCAST_INTERVAL: Duration = Duration::from_secs(2);
 const OFFLINE_THRESHOLD: i64 = 15000; // 15 seconds
 
+/// Every address the discovery beacon should be sent to: the limited
+/// broadcast plus each IPv4 interface's directed subnet broadcast. This is
+/// what makes discovery work when a machine has more than one active adapter.
+fn broadcast_targets() -> Vec<std::net::SocketAddr> {
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    let mut targets: Vec<SocketAddr> =
+        vec![SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT))];
+
+    if let Ok(ifaces) = if_addrs::get_if_addrs() {
+        for iface in ifaces {
+            if iface.is_loopback() {
+                continue;
+            }
+            if let if_addrs::IfAddr::V4(v4) = iface.addr {
+                // Prefer the OS-reported broadcast; otherwise derive it from
+                // ip | ~netmask. Skip /32 point-to-point links (VPNs), where
+                // a subnet broadcast is meaningless.
+                let bcast = v4.broadcast.unwrap_or_else(|| {
+                    Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask))
+                });
+                if bcast == v4.ip || bcast.is_unspecified() {
+                    continue;
+                }
+                let addr = SocketAddr::from((bcast, DISCOVERY_PORT));
+                if !targets.contains(&addr) {
+                    targets.push(addr);
+                }
+            }
+        }
+    }
+
+    targets
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct DiscoveryMessage {
     id: String,
@@ -136,9 +171,17 @@ impl DiscoveryService {
                     tokio::select! {
                         _ = shutdown_rx_broadcast.recv() => break,
                         _ = interval.tick() => {
-                            let target = format!("255.255.255.255:{}", DISCOVERY_PORT);
-                            if let Err(e) = broadcast_socket.send_to(&msg_bytes, &target).await {
-                                warn!("Broadcast send error: {}", e);
+                            // Send to the global broadcast address AND every
+                            // interface's directed broadcast. On multi-NIC
+                            // machines the OS only sends 255.255.255.255 out one
+                            // interface, so without this peers on the other
+                            // adapter's subnet never see us. Recomputed each
+                            // tick so newly-connected networks/VPNs are picked up.
+                            for target in broadcast_targets() {
+                                if let Err(e) = broadcast_socket.send_to(&msg_bytes, &target).await {
+                                    // Down/unreachable interfaces are normal — keep quiet.
+                                    log::debug!("Broadcast to {} failed: {}", target, e);
+                                }
                             }
                         }
                     }

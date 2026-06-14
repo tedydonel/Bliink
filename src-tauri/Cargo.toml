@@ -31,6 +31,9 @@ tokio = { version = "1", features = ["full"] }
 
 # Device discovery
 socket2 = "0.5"
+# Enumerate network interfaces so discovery can broadcast on every subnet
+# (multi-NIC machines: Wi-Fi + Ethernet + VPN/Hyper-V/WSL virtual adapters)
+if-addrs = "0.13"
 
 # Unique identifiers
 uuid = { version = "1", features = ["v4", "serde"] }

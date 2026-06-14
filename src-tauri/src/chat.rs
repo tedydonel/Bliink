@@ -98,7 +98,34 @@ pub struct ChatStore {
 }
 
 impl ChatStore {
-    pub fn new(db_path: &Path) -> Result<Self, String> {
+    /// Open the chat store, never failing: a corrupt database is recreated,
+    /// and if even that fails we fall back to an in-memory store so the app
+    /// always starts (chat history is just not persisted that session).
+    pub fn open_resilient(db_path: &Path) -> Self {
+        match Self::open(db_path) {
+            Ok(store) => store,
+            Err(e) => {
+                warn!(
+                    "Chat database at {:?} unusable ({}); recreating",
+                    db_path, e
+                );
+                crate::history::remove_db_files(db_path);
+                match Self::open(db_path) {
+                    Ok(store) => store,
+                    Err(e2) => {
+                        error!(
+                            "Chat database still unusable after reset ({}); using in-memory store",
+                            e2
+                        );
+                        Self::open(Path::new(":memory:"))
+                            .expect("opening an in-memory SQLite database cannot fail")
+                    }
+                }
+            }
+        }
+    }
+
+    fn open(db_path: &Path) -> Result<Self, String> {
         let conn = Connection::open(db_path)
             .map_err(|e| format!("Failed to open chat database: {}", e))?;
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
@@ -129,6 +156,13 @@ impl ChatStore {
             );",
         )
         .map_err(|e| format!("Failed to create chat tables: {}", e))?;
+
+        // Force a read so a corrupt page surfaces here (triggering a recreate)
+        // instead of panicking later at runtime.
+        conn.query_row("SELECT COUNT(*) FROM chat_messages", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|e| format!("Chat database integrity check failed: {}", e))?;
 
         info!("Chat store initialized");
         Ok(Self {

@@ -22,6 +22,14 @@ const MAX_BATCH_FILES: usize = 10_000;
 const MAX_EMBED_THUMB: usize = 64 * 1024;
 const EMBED_THUMB_PX: u32 = 96;
 const EMBED_THUMB_QUALITY: u8 = 55;
+/// Don't try to build an embedded preview for files this large — decoding a
+/// huge image would stall the send for no real benefit.
+const MAX_THUMB_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+/// Smallest allowed chunk size — guards against a 0 from bad settings (which
+/// would divide-by-zero when computing chunk counts).
+const MIN_CHUNK_SIZE: usize = 64 * 1024;
+/// Throttle progress events: emit at most this often, plus on completion.
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(200);
 
 // Protocol response bytes (sent inside encrypted frames)
 const RESP_DECLINE: u8 = 0;
@@ -140,16 +148,6 @@ struct SendJob {
     relative_path: Option<String>,
     batch: Option<BatchMeta>,
     chat_message_id: Option<String>,
-}
-
-/// A registered transfer ready to run: the item is already in the active
-/// map and the header (including hash) is computed.
-pub struct PreparedSend {
-    transfer_id: String,
-    path: PathBuf,
-    target: SendTarget,
-    header: TransferHeader,
-    chunk_size: usize,
 }
 
 pub struct TransferEngine {
@@ -348,13 +346,13 @@ impl TransferEngine {
         Ok(())
     }
 
-    /// Register a transfer and compute its header. The returned value can be
-    /// run in the background (spawn_send) or awaited inline (run_send).
-    async fn prepare_send(&self, job: SendJob) -> Result<PreparedSend, String> {
+    /// Register a Pending transfer item immediately (only a stat, no hashing)
+    /// so the UI shows it the moment the user hits send — even for a huge file
+    /// whose hash takes a while to compute.
+    async fn register_pending(&self, job: &SendJob, transfer_id: &str) -> Result<(), String> {
         if !job.path.exists() {
             return Err("File does not exist".to_string());
         }
-
         let metadata = fs::metadata(&job.path)
             .await
             .map_err(|e| format!("Failed to read file metadata: {}", e))?;
@@ -366,143 +364,159 @@ impl TransferEngine {
             .to_string_lossy()
             .to_string();
         let display_name = job.relative_path.clone().unwrap_or_else(|| file_name.clone());
-        let file_size = metadata.len();
-        let file_type = mime_guess_from_ext(&job.path);
-
-        let chunk_size = *self.chunk_size.read().await;
-        let total_chunks = (file_size + chunk_size as u64 - 1) / chunk_size as u64;
-
-        let transfer_id = uuid::Uuid::new_v4().to_string();
-
-        info!("Computing hash for {}", display_name);
-        let hash = compute_file_hash(&job.path).await?;
-
-        // Embed a small preview so the receiver sees it before accepting
-        let thumbnail = crate::thumbs::thumbnail_jpeg(
-            job.path.clone(),
-            EMBED_THUMB_PX,
-            EMBED_THUMB_QUALITY,
-        )
-        .await
-        .filter(|jpeg| jpeg.len() <= MAX_EMBED_THUMB)
-        .map(|jpeg| crate::thumbs::to_data_url(&jpeg));
-
-        let header = TransferHeader {
-            id: transfer_id.clone(),
-            file_name,
-            file_size,
-            file_type: file_type.clone(),
-            chunk_size: chunk_size as u64,
-            total_chunks,
-            hash,
-            sender_id: job.sender_id,
-            sender_name: job.sender_name,
-            relative_path: job.relative_path,
-            batch_id: job.batch.as_ref().map(|b| b.id.clone()),
-            batch_name: job.batch.as_ref().and_then(|b| b.name.clone()),
-            batch_total_files: job.batch.as_ref().map(|b| b.total_files),
-            batch_total_bytes: job.batch.as_ref().map(|b| b.total_bytes),
-            thumbnail: thumbnail.clone(),
-            chat_message_id: job.chat_message_id.clone(),
-            protocol: crate::types::PROTOCOL_VERSION,
-        };
 
         let transfer = TransferItem {
-            id: transfer_id.clone(),
+            id: transfer_id.to_string(),
             file_name: display_name,
-            file_size,
-            file_type,
+            file_size: metadata.len(),
+            file_type: mime_guess_from_ext(&job.path),
             progress: 0.0,
             speed: 0.0,
             status: TransferStatus::Pending,
             direction: TransferDirection::Upload,
-            device_id: job.device_id,
-            device_name: job.device_name,
+            device_id: job.device_id.clone(),
+            device_name: job.device_name.clone(),
             started_at: chrono::Utc::now().timestamp_millis(),
             completed_at: None,
             error: None,
             verification_code: None,
-            thumbnail,
+            thumbnail: None,
             batch_id: job.batch.as_ref().map(|b| b.id.clone()),
             batch_name: job.batch.as_ref().and_then(|b| b.name.clone()),
             batch_total_files: job.batch.as_ref().map(|b| b.total_files),
             batch_total_bytes: job.batch.as_ref().map(|b| b.total_bytes),
-            chat_message_id: job.chat_message_id,
+            chat_message_id: job.chat_message_id.clone(),
         };
 
         self.active_transfers
             .write()
             .await
-            .insert(transfer_id.clone(), transfer);
-
-        Ok(PreparedSend {
-            transfer_id,
-            path: job.path,
-            target: job.target,
-            header,
-            chunk_size,
-        })
+            .insert(transfer_id.to_string(), transfer);
+        Ok(())
     }
 
-    /// Run a prepared transfer to completion, recording failures.
-    pub async fn run_send(&self, prepared: PreparedSend) {
-        let mut command_rx = self.command_tx.subscribe();
-        let tid = prepared.transfer_id.clone();
+    /// Compute the transfer header (this is where the file is fully hashed and
+    /// a preview is generated). Kept off the command path so a big file never
+    /// blocks the UI.
+    async fn build_header(
+        &self,
+        job: &SendJob,
+        transfer_id: &str,
+    ) -> Result<(TransferHeader, usize), String> {
+        let metadata = fs::metadata(&job.path)
+            .await
+            .map_err(|e| format!("Failed to read file metadata: {}", e))?;
+        let file_name = job
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let display_name = job.relative_path.clone().unwrap_or_else(|| file_name.clone());
+        let file_size = metadata.len();
+        let file_type = mime_guess_from_ext(&job.path);
 
-        info!("Connecting to {}", prepared.target);
-        let stream = match self.connect_target(&prepared.target).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                error!("Transfer {} failed to connect: {}", tid, e);
-                set_status(&self.active_transfers, &tid, TransferStatus::Failed, Some(e.clone()))
-                    .await;
-                let _ = self.progress_tx.send(TransferProgress {
-                    id: tid,
-                    progress: 0.0,
-                    speed: 0.0,
-                    status: TransferStatus::Failed,
-                    error: Some(e),
-                });
-                return;
-            }
+        // Never let a bad setting produce a zero chunk size (divide-by-zero).
+        let chunk_size = (*self.chunk_size.read().await).max(MIN_CHUNK_SIZE);
+        let total_chunks = if file_size == 0 {
+            0
+        } else {
+            (file_size + chunk_size as u64 - 1) / chunk_size as u64
         };
 
-        match send_file_impl(
-            &prepared.path,
+        info!("Computing hash for {}", display_name);
+        let hash = compute_file_hash(&job.path).await?;
+
+        // Embed a small preview so the receiver sees it before accepting —
+        // but skip it for very large files (decoding would stall the send).
+        let thumbnail = if file_size <= MAX_THUMB_SOURCE_BYTES {
+            crate::thumbs::thumbnail_jpeg(job.path.clone(), EMBED_THUMB_PX, EMBED_THUMB_QUALITY)
+                .await
+                .filter(|jpeg| jpeg.len() <= MAX_EMBED_THUMB)
+                .map(|jpeg| crate::thumbs::to_data_url(&jpeg))
+        } else {
+            None
+        };
+
+        // Reflect the preview on the already-registered item.
+        if thumbnail.is_some() {
+            if let Some(t) = self.active_transfers.write().await.get_mut(transfer_id) {
+                t.thumbnail = thumbnail.clone();
+            }
+        }
+
+        let header = TransferHeader {
+            id: transfer_id.to_string(),
+            file_name,
+            file_size,
+            file_type,
+            chunk_size: chunk_size as u64,
+            total_chunks,
+            hash,
+            sender_id: job.sender_id.clone(),
+            sender_name: job.sender_name.clone(),
+            relative_path: job.relative_path.clone(),
+            batch_id: job.batch.as_ref().map(|b| b.id.clone()),
+            batch_name: job.batch.as_ref().and_then(|b| b.name.clone()),
+            batch_total_files: job.batch.as_ref().map(|b| b.total_files),
+            batch_total_bytes: job.batch.as_ref().map(|b| b.total_bytes),
+            thumbnail,
+            chat_message_id: job.chat_message_id.clone(),
+            protocol: crate::types::PROTOCOL_VERSION,
+        };
+        Ok((header, chunk_size))
+    }
+
+    /// Run a registered job to completion: hash → connect → transmit,
+    /// recording failures on the transfer item.
+    async fn run_job(&self, job: SendJob, transfer_id: String) {
+        let fail = |e: String| async {
+            error!("Transfer {} failed: {}", transfer_id, e);
+            set_status(
+                &self.active_transfers,
+                &transfer_id,
+                TransferStatus::Failed,
+                Some(e.clone()),
+            )
+            .await;
+            let _ = self.progress_tx.send(TransferProgress {
+                id: transfer_id.clone(),
+                progress: 0.0,
+                speed: 0.0,
+                status: TransferStatus::Failed,
+                error: Some(e),
+            });
+        };
+
+        let (header, chunk_size) = match self.build_header(&job, &transfer_id).await {
+            Ok(v) => v,
+            Err(e) => return fail(e).await,
+        };
+
+        info!("Connecting to {}", job.target);
+        let stream = match self.connect_target(&job.target).await {
+            Ok(stream) => stream,
+            Err(e) => return fail(e).await,
+        };
+
+        let mut command_rx = self.command_tx.subscribe();
+        if let Err(e) = send_file_impl(
+            &job.path,
             stream,
-            prepared.header,
-            prepared.chunk_size,
+            header,
+            chunk_size,
             self.active_transfers.clone(),
             self.progress_tx.clone(),
             self.code_tx.clone(),
             &mut command_rx,
-            &tid,
+            &transfer_id,
         )
         .await
         {
-            Ok(_) => {
-                info!("Send task for {} finished", tid);
-            }
-            Err(e) => {
-                error!("Transfer {} failed: {}", tid, e);
-                set_status(&self.active_transfers, &tid, TransferStatus::Failed, Some(e.clone()))
-                    .await;
-                let _ = self.progress_tx.send(TransferProgress {
-                    id: tid,
-                    progress: 0.0,
-                    speed: 0.0,
-                    status: TransferStatus::Failed,
-                    error: Some(e),
-                });
-            }
+            fail(e).await;
+        } else {
+            info!("Send task for {} finished", transfer_id);
         }
-    }
-
-    pub fn spawn_send(self: &Arc<Self>, prepared: PreparedSend) {
-        let engine = self.clone();
-        tokio::spawn(async move {
-            engine.run_send(prepared).await;
-        });
     }
 
     pub async fn send_file(
@@ -526,9 +540,15 @@ impl TransferEngine {
             batch: None,
             chat_message_id: None,
         };
-        let prepared = self.prepare_send(job).await?;
-        let transfer_id = prepared.transfer_id.clone();
-        self.spawn_send(prepared);
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        // Register synchronously (fast) so the command returns immediately and
+        // the UI shows the transfer; hashing/sending happen in the background.
+        self.register_pending(&job, &transfer_id).await?;
+        let engine = self.clone();
+        let tid = transfer_id.clone();
+        tokio::spawn(async move {
+            engine.run_job(job, tid).await;
+        });
         Ok(transfer_id)
     }
 
@@ -555,9 +575,13 @@ impl TransferEngine {
             batch: None,
             chat_message_id: Some(chat_message_id.to_string()),
         };
-        let prepared = self.prepare_send(job).await?;
-        let transfer_id = prepared.transfer_id.clone();
-        self.spawn_send(prepared);
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        self.register_pending(&job, &transfer_id).await?;
+        let engine = self.clone();
+        let tid = transfer_id.clone();
+        tokio::spawn(async move {
+            engine.run_job(job, tid).await;
+        });
         Ok(transfer_id)
     }
 
@@ -590,17 +614,13 @@ impl TransferEngine {
                     batch: batch.clone(),
                     chat_message_id: None,
                 };
-                let transfer_id = match engine.prepare_send(job).await {
-                    Ok(prepared) => {
-                        let id = prepared.transfer_id.clone();
-                        engine.run_send(prepared).await;
-                        id
-                    }
-                    Err(e) => {
-                        error!("Failed to send {}: {}", label, e);
-                        continue;
-                    }
-                };
+                let transfer_id = uuid::Uuid::new_v4().to_string();
+                if let Err(e) = engine.register_pending(&job, &transfer_id).await {
+                    error!("Failed to send {}: {}", label, e);
+                    continue;
+                }
+                // Files are sent sequentially so the receiver is prompted once.
+                engine.run_job(job, transfer_id.clone()).await;
 
                 // If the receiver declined the batch, stop sending the rest
                 if batch.is_some() {
@@ -899,6 +919,7 @@ async fn send_file_impl(
     let mut sent: u64 = 0;
     let total = header.file_size;
     let start = std::time::Instant::now();
+    let mut last_emit = std::time::Instant::now();
     let mut paused = false;
 
     set_status(&active, transfer_id, TransferStatus::Transferring, None).await;
@@ -955,25 +976,36 @@ async fn send_file_impl(
         secure.send_frame(&buf[..n]).await?;
 
         sent += n as u64;
-        let elapsed = start.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 { sent as f64 / elapsed } else { 0.0 };
-        let progress = (sent as f64 / total as f64) * 100.0;
 
-        {
-            let mut transfers = active.write().await;
-            if let Some(t) = transfers.get_mut(transfer_id) {
-                t.progress = progress;
-                t.speed = speed;
+        // Throttle progress updates: emitting one event per 1 MB chunk would
+        // flood the frontend on a multi-GB file. Update at most every
+        // PROGRESS_EMIT_INTERVAL (and once at the end, below).
+        if last_emit.elapsed() >= PROGRESS_EMIT_INTERVAL {
+            last_emit = std::time::Instant::now();
+            let elapsed = start.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 { sent as f64 / elapsed } else { 0.0 };
+            let progress = if total > 0 {
+                (sent as f64 / total as f64) * 100.0
+            } else {
+                100.0
+            };
+
+            {
+                let mut transfers = active.write().await;
+                if let Some(t) = transfers.get_mut(transfer_id) {
+                    t.progress = progress;
+                    t.speed = speed;
+                }
             }
-        }
 
-        let _ = progress_tx.send(TransferProgress {
-            id: transfer_id.to_string(),
-            progress,
-            speed,
-            status: TransferStatus::Transferring,
-            error: None,
-        });
+            let _ = progress_tx.send(TransferProgress {
+                id: transfer_id.to_string(),
+                progress,
+                speed,
+                status: TransferStatus::Transferring,
+                error: None,
+            });
+        }
     }
 
     info!("File data sent for {}, waiting for receiver verification", transfer_id);
@@ -1054,9 +1086,9 @@ async fn handle_incoming(stream: DynStream, ctx: ReceiverCtx) -> Result<(), Stri
         }
         None => (dl_path.clone(), sanitize_file_name(&header.file_name)),
     };
-    tokio::fs::create_dir_all(&dest_dir)
-        .await
-        .map_err(|e| format!("Create download dir error: {}", e))?;
+    // NOTE: the destination directory is created only after consent is granted
+    // (below) so a declined/timed-out folder transfer never leaves behind an
+    // empty folder on the receiver.
     let file_path = unique_file_path(&dest_dir, &base_name);
     let display_name = file_path
         .strip_prefix(&dl_path)
@@ -1187,6 +1219,14 @@ async fn handle_incoming(stream: DynStream, ctx: ReceiverCtx) -> Result<(), Stri
     secure.send_frame(&[RESP_ACCEPT]).await?;
     set_status(&ctx.active, &header.id, TransferStatus::Transferring, None).await;
 
+    // Now that the transfer is accepted, materialize the destination folder
+    // (for folder sends this recreates the directory tree).
+    if let Some(parent) = file_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Create download dir error: {}", e))?;
+    }
+
     // Receive into a .part file; clean up on any failure
     let part_path = file_path.with_file_name(format!("{}.part", base_name));
     info!("Receiving to {:?}", part_path);
@@ -1283,6 +1323,7 @@ async fn receive_file_data(
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
     let start = std::time::Instant::now();
+    let mut last_emit = std::time::Instant::now();
     let mut paused = false;
 
     while received < header.file_size {
@@ -1331,25 +1372,29 @@ async fn receive_file_data(
             .await
             .map_err(|e| format!("Write error: {}", e))?;
 
-        let elapsed = start.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 { received as f64 / elapsed } else { 0.0 };
-        let progress = (received as f64 / header.file_size as f64) * 100.0;
+        // Throttle progress events the same way the sender does.
+        if last_emit.elapsed() >= PROGRESS_EMIT_INTERVAL {
+            last_emit = std::time::Instant::now();
+            let elapsed = start.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 { received as f64 / elapsed } else { 0.0 };
+            let progress = (received as f64 / header.file_size as f64) * 100.0;
 
-        {
-            let mut transfers = ctx.active.write().await;
-            if let Some(t) = transfers.get_mut(&header.id) {
-                t.progress = progress;
-                t.speed = speed;
+            {
+                let mut transfers = ctx.active.write().await;
+                if let Some(t) = transfers.get_mut(&header.id) {
+                    t.progress = progress;
+                    t.speed = speed;
+                }
             }
-        }
 
-        let _ = ctx.progress_tx.send(TransferProgress {
-            id: header.id.clone(),
-            progress,
-            speed,
-            status: TransferStatus::Transferring,
-            error: None,
-        });
+            let _ = ctx.progress_tx.send(TransferProgress {
+                id: header.id.clone(),
+                progress,
+                speed,
+                status: TransferStatus::Transferring,
+                error: None,
+            });
+        }
     }
 
     file.flush()
